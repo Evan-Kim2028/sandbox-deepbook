@@ -50,7 +50,6 @@ The backend loads real DeepBook V3 pool state from a Snowflake checkpoint (240M)
 ### Prerequisites
 
 - **Rust 1.75+** ([install](https://rustup.rs))
-- **Sui gRPC API key** - needed at startup to load Move packages. Get one from the [Sui developer portal](https://sui.io/developers) or use a Mysten Labs gRPC endpoint.
 
 ### 1. Clone and configure
 
@@ -58,16 +57,11 @@ The backend loads real DeepBook V3 pool state from a Snowflake checkpoint (240M)
 git clone https://github.com/Evan-Kim2028/sandbox-deepbook.git
 cd sandbox-deepbook/backend
 
-# Set up environment
+# Set up environment (uses public Sui gRPC endpoint by default)
 cp .env.example .env
 ```
 
-Edit `backend/.env` and add your gRPC API key:
-
-```bash
-SUI_GRPC_ENDPOINT=https://grpc.mainnet.sui.io
-SUI_GRPC_API_KEY=your_key_here   # Required - used once at startup to fetch Move packages
-```
+The default `.env` uses `https://archive.mainnet.sui.io:443` for fetching Move packages at startup. No API key needed.
 
 ### 2. Build and run the server
 
