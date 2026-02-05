@@ -160,8 +160,10 @@ pub async fn reset_session(
         .await
         .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
 
+    // Clone fresh orderbooks from global state for the reset
+    let fresh_orderbooks = state.orderbooks.read().await.clone();
     let mut session = session_arc.write().await;
-    session.reset();
+    session.reset(fresh_orderbooks);
 
     Ok(Json(ResetResponse {
         success: true,

@@ -115,6 +115,59 @@ impl SandboxOrderbook {
             .map(|l| l.price as f64 / self.price_divisor())
     }
 
+    /// Consume liquidity from the orderbook after a swap.
+    /// Walks price levels the same way calculate_quote does, subtracting consumed
+    /// base quantity from each level and removing empty levels.
+    ///
+    /// `input_amount` is in smallest units of the input token.
+    /// `is_sell=true`: selling base (walk bids), `is_sell=false`: buying base with quote (walk asks).
+    pub fn consume_liquidity(&mut self, input_amount: u64, is_sell: bool) {
+        let base_scale = 10f64.powi(self.base_decimals as i32);
+        let quote_scale = 1_000_000.0f64; // USDC always 6 decimals
+        let price_divisor = self.price_divisor_value();
+
+        let levels = if is_sell { &mut self.bids } else { &mut self.asks };
+        let mut remaining_input = input_amount as f64;
+
+        for level in levels.iter_mut() {
+            if remaining_input <= 0.0 {
+                break;
+            }
+
+            let price_usd = level.price as f64 / price_divisor;
+            let level_qty = level.total_quantity as f64 / base_scale;
+
+            if is_sell {
+                // Selling base tokens for quote: remaining_input is base smallest units
+                let input_base = remaining_input / base_scale;
+                let take_qty = level_qty.min(input_base);
+                if take_qty > 0.0 {
+                    let consumed_raw = (take_qty * base_scale) as u64;
+                    level.total_quantity = level.total_quantity.saturating_sub(consumed_raw);
+                    remaining_input -= take_qty * base_scale;
+                }
+            } else {
+                // Buying base tokens with quote: remaining_input is quote smallest units
+                let input_quote = remaining_input / quote_scale;
+                let cost_for_level = level_qty * price_usd;
+                if cost_for_level <= input_quote {
+                    // Take entire level
+                    remaining_input -= cost_for_level * quote_scale;
+                    level.total_quantity = 0;
+                } else {
+                    // Partial fill
+                    let take_qty = input_quote / price_usd;
+                    let consumed_raw = (take_qty * base_scale) as u64;
+                    level.total_quantity = level.total_quantity.saturating_sub(consumed_raw);
+                    remaining_input = 0.0;
+                }
+            }
+        }
+
+        // Remove levels with zero quantity
+        levels.retain(|l| l.total_quantity > 0);
+    }
+
     pub fn spread_bps(&self) -> Option<u64> {
         let best_bid = self.bids.first().map(|l| l.price)?;
         let best_ask = self.asks.first().map(|l| l.price)?;

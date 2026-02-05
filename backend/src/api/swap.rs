@@ -102,6 +102,8 @@ pub struct QuoteRequest {
     pub from_token: String,
     pub to_token: String,
     pub amount: String,
+    /// Optional session_id to quote against session-specific orderbook (reflects consumed liquidity)
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -304,16 +306,16 @@ pub async fn execute_swap(
         .parse()
         .map_err(|_| ApiError::BadRequest("Invalid amount".into()))?;
 
-    // Get MoveVM-built orderbook
-    let orderbooks = state.orderbooks.read().await;
-    let ob = orderbooks.get(&pool_id).ok_or_else(|| {
-        ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
-    })?;
-
     // Determine if selling base (SUI/DEEP/WAL) or buying base
     let is_sell = from != "USDC";
 
-    // Calculate quote using MoveVM orderbook walk
+    // Use the session's per-session orderbook for quoting and liquidity consumption
+    let mut session = session_arc.write().await;
+    let ob = session.orderbooks.get(&pool_id).ok_or_else(|| {
+        ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
+    })?;
+
+    // Calculate quote using session's orderbook walk
     let quote = calculate_quote(ob, amount, is_sell);
 
     // Calculate mid price and price impact
@@ -325,11 +327,7 @@ pub async fn execute_swap(
         0
     };
 
-    // Drop the orderbooks lock before acquiring session lock
-    drop(orderbooks);
-
     // Execute swap in session (update balances with pre-calculated output)
-    let mut session = session_arc.write().await;
     let result = session.execute_swap(
         pool_id,
         &from,
@@ -338,6 +336,13 @@ pub async fn execute_swap(
         quote.output_amount,
         quote.effective_price,
     );
+
+    // Consume liquidity from the session's orderbook on success
+    if result.as_ref().map(|r| r.success).unwrap_or(false) {
+        if let Some(session_ob) = session.orderbooks.get_mut(&pool_id) {
+            session_ob.consume_liquidity(amount, is_sell);
+        }
+    }
 
     match result {
         Ok(swap_result) => {
@@ -474,12 +479,6 @@ pub async fn get_quote(
         })?,
     };
 
-    // Get MoveVM-built orderbook
-    let orderbooks = state.orderbooks.read().await;
-    let ob = orderbooks.get(&pool_id).ok_or_else(|| {
-        ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
-    })?;
-
     // Parse amount
     let amount: u64 = req
         .amount
@@ -488,22 +487,54 @@ pub async fn get_quote(
 
     // Determine if selling base or buying base
     let is_sell = from != "USDC";
-    let base_scale = 10f64.powi(ob.base_decimals as i32);
+
+    // Try to use session-specific orderbook if session_id provided
+    let session_arc = if let Some(ref sid) = req.session_id {
+        state.session_manager.get_session(sid).await
+    } else {
+        None
+    };
+
+    // Helper struct to hold quote results so we can compute them in a scoped block
+    struct QuoteResult {
+        quote: QuoteCalculation,
+        mid_price: f64,
+        base_scale: f64,
+    }
+
+    let qr = if let Some(ref session_arc) = session_arc {
+        // Session-specific orderbook (reflects consumed liquidity)
+        let session = session_arc.read().await;
+        let ob = session.orderbooks.get(&pool_id).ok_or_else(|| {
+            ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
+        })?;
+        QuoteResult {
+            quote: calculate_quote(ob, amount, is_sell),
+            mid_price: ob.mid_price().unwrap_or(0.0),
+            base_scale: 10f64.powi(ob.base_decimals as i32),
+        }
+    } else {
+        // Global orderbook (default for pre-session quotes)
+        let orderbooks = state.orderbooks.read().await;
+        let ob = orderbooks.get(&pool_id).ok_or_else(|| {
+            ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
+        })?;
+        QuoteResult {
+            quote: calculate_quote(ob, amount, is_sell),
+            mid_price: ob.mid_price().unwrap_or(0.0),
+            base_scale: 10f64.powi(ob.base_decimals as i32),
+        }
+    };
+
     let quote_scale = 1_000_000.0;
-
-    // Calculate quote using MoveVM orderbook walk
-    let quote = calculate_quote(ob, amount, is_sell);
-
     let input_human = if is_sell {
-        amount as f64 / base_scale
+        amount as f64 / qr.base_scale
     } else {
         amount as f64 / quote_scale
     };
 
-    let mid_price = ob.mid_price().unwrap_or(0.0);
-
-    let price_impact_bps = if mid_price > 0.0 {
-        ((quote.effective_price - mid_price).abs() / mid_price * 10_000.0) as u32
+    let price_impact_bps = if qr.mid_price > 0.0 {
+        ((qr.quote.effective_price - qr.mid_price).abs() / qr.mid_price * 10_000.0) as u32
     } else {
         0
     };
@@ -516,14 +547,14 @@ pub async fn get_quote(
         output_token: to.clone(),
         input_amount: req.amount.clone(),
         input_amount_human: input_human,
-        estimated_output: quote.output_amount.to_string(),
-        estimated_output_human: quote.output_human,
-        effective_price: quote.effective_price,
-        mid_price,
+        estimated_output: qr.quote.output_amount.to_string(),
+        estimated_output_human: qr.quote.output_human,
+        effective_price: qr.quote.effective_price,
+        mid_price: qr.mid_price,
         price_impact_bps,
-        levels_consumed: quote.levels_consumed,
-        orders_matched: quote.orders_matched,
-        fully_fillable: quote.fully_filled,
+        levels_consumed: qr.quote.levels_consumed,
+        orders_matched: qr.quote.orders_matched,
+        fully_fillable: qr.quote.fully_filled,
         route: format!("{} -> DeepBook {} -> {}", from, pool_id.display_name(), to),
     }))
 }

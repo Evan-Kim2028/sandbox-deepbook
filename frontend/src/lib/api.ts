@@ -5,7 +5,9 @@ import type {
   SwapResponse,
   FaucetRequest,
   FaucetResponse,
-  OrderBook,
+  OrderBookResponse,
+  QuoteResponse,
+  PoolInfo,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -39,9 +41,13 @@ export const api = {
 
   // Balances
   getBalances: (sessionId: string) =>
-    fetchAPI<{ balances: Balances }>(`/balance/${sessionId}`).then(
+    fetchAPI<{ session_id: string; balances: Balances }>(`/balance/${sessionId}`).then(
       (r) => r.balances
     ),
+
+  // Pools
+  getPools: () =>
+    fetchAPI<{ total_loaded: number; pools: PoolInfo[] }>('/pools'),
 
   // Faucet
   requestTokens: (params: FaucetRequest) =>
@@ -57,16 +63,18 @@ export const api = {
       body: JSON.stringify(params),
     }),
 
-  getQuote: (params: { from_token: string; to_token: string; amount: string }) =>
-    fetchAPI<{ estimated_output: string; price_impact_bps: number }>(
-      '/swap/quote',
-      {
-        method: 'POST',
-        body: JSON.stringify(params),
-      }
-    ),
+  getQuote: (params: { from_token: string; to_token: string; amount: string; session_id?: string }) =>
+    fetchAPI<QuoteResponse>('/swap/quote', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
 
   // Order Book
-  getOrderBook: (poolId?: string) =>
-    fetchAPI<OrderBook>(`/orderbook${poolId ? `?pool=${poolId}` : ''}`),
+  getOrderBook: (pool?: string, sessionId?: string) => {
+    const params = new URLSearchParams();
+    if (pool) params.set('pool', pool);
+    if (sessionId) params.set('session_id', sessionId);
+    const qs = params.toString();
+    return fetchAPI<OrderBookResponse>(`/orderbook${qs ? `?${qs}` : ''}`);
+  },
 };

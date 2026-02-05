@@ -79,6 +79,8 @@ pub struct OrderbookQuery {
     /// Pool to query (sui_usdc, wal_usdc, deep_usdc). Defaults to sui_usdc
     #[serde(default = "default_pool")]
     pub pool: String,
+    /// Optional session_id to get session-specific orderbook (reflects consumed liquidity)
+    pub session_id: Option<String>,
 }
 
 fn default_pool() -> String {
@@ -105,21 +107,41 @@ pub async fn get_orderbook(
         }
     };
 
-    // Read from MoveVM-built orderbook cache
-    let orderbooks = state.orderbooks.read().await;
-    let ob = match orderbooks.get(&pool_id) {
-        Some(ob) => ob,
-        None => {
-            return Json(OrderbookResponse {
-                success: false,
-                error: Some(format!("Pool '{}' orderbook not built", pool_id.display_name())),
-                orderbook: None,
-                stats: None,
-            });
-        }
+    // Try to use session-specific orderbook if session_id provided
+    let session_arc = if let Some(ref sid) = query.session_id {
+        state.session_manager.get_session(sid).await
+    } else {
+        None
     };
 
-    let snapshot = sandbox_orderbook_to_snapshot(ob);
+    let snapshot = if let Some(ref session_arc) = session_arc {
+        let session = session_arc.read().await;
+        match session.orderbooks.get(&pool_id) {
+            Some(ob) => sandbox_orderbook_to_snapshot(ob),
+            None => {
+                return Json(OrderbookResponse {
+                    success: false,
+                    error: Some(format!("Pool '{}' orderbook not built", pool_id.display_name())),
+                    orderbook: None,
+                    stats: None,
+                });
+            }
+        }
+    } else {
+        // Global orderbook (no session)
+        let orderbooks = state.orderbooks.read().await;
+        match orderbooks.get(&pool_id) {
+            Some(ob) => sandbox_orderbook_to_snapshot(ob),
+            None => {
+                return Json(OrderbookResponse {
+                    success: false,
+                    error: Some(format!("Pool '{}' orderbook not built", pool_id.display_name())),
+                    orderbook: None,
+                    stats: None,
+                });
+            }
+        }
+    };
 
     // Get stats from registry for object counts
     let registry = state.pool_registry.read().await;

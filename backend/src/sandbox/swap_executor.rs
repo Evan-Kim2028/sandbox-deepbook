@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::orderbook_builder::SandboxOrderbook;
 use super::state_loader::PoolId;
 
 // Initial balances for new sessions
@@ -141,16 +142,19 @@ pub struct TradingSession {
     pub balances: UserBalances,
     pub swap_history: Vec<SwapResult>,
     pub checkpoint: u64,
+    /// Per-session orderbook clones (modified by swaps)
+    pub orderbooks: HashMap<PoolId, SandboxOrderbook>,
 }
 
 impl TradingSession {
-    /// Create a new trading session
-    pub fn new(_session_id: String) -> Result<Self> {
+    /// Create a new trading session with cloned orderbooks
+    pub fn new(_session_id: String, orderbooks: HashMap<PoolId, SandboxOrderbook>) -> Result<Self> {
         Ok(Self {
             created_at: std::time::Instant::now(),
             balances: UserBalances::initial(),
             swap_history: Vec::new(),
             checkpoint: 240_000_000, // Default to checkpoint 240M
+            orderbooks,
         })
     }
 
@@ -294,29 +298,34 @@ impl TradingSession {
         Ok(result)
     }
 
-    /// Reset session to initial state
-    pub fn reset(&mut self) {
+    /// Reset session to initial state with fresh orderbook clones
+    pub fn reset(&mut self, fresh_orderbooks: HashMap<PoolId, SandboxOrderbook>) {
         self.balances = UserBalances::initial();
         self.swap_history.clear();
+        self.orderbooks = fresh_orderbooks;
     }
 }
 
 /// Session store for managing multiple trading sessions
 pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<RwLock<TradingSession>>>>,
+    /// Global orderbooks cloned into each new session
+    global_orderbooks: RwLock<HashMap<PoolId, SandboxOrderbook>>,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
+    pub fn new(global_orderbooks: HashMap<PoolId, SandboxOrderbook>) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            global_orderbooks: RwLock::new(global_orderbooks),
         }
     }
 
-    /// Create a new session
+    /// Create a new session with cloned orderbooks
     pub async fn create_session(&self) -> Result<String> {
         let session_id = uuid::Uuid::new_v4().to_string();
-        let session = TradingSession::new(session_id.clone())?;
+        let orderbooks = self.global_orderbooks.read().await.clone();
+        let session = TradingSession::new(session_id.clone(), orderbooks)?;
 
         let mut sessions = self.sessions.write().await;
         sessions.insert(session_id.clone(), Arc::new(RwLock::new(session)));
@@ -328,12 +337,5 @@ impl SessionManager {
     pub async fn get_session(&self, session_id: &str) -> Option<Arc<RwLock<TradingSession>>> {
         let sessions = self.sessions.read().await;
         sessions.get(session_id).cloned()
-    }
-
-}
-
-impl Default for SessionManager {
-    fn default() -> Self {
-        Self::new()
     }
 }

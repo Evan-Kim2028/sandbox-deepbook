@@ -31,9 +31,8 @@ async fn main() {
     let pool_registry = Arc::new(RwLock::new(PoolRegistry::new()));
     tracing::info!("PoolRegistry initialized");
 
-    // Create session manager
-    let session_manager = Arc::new(SessionManager::new());
-    tracing::info!("SessionManager initialized");
+    // Session manager is created after orderbooks are built (needs global orderbooks)
+    // See below after MoveVM orderbook construction
 
     // Define pool state files (relative to working directory)
     // Using validated checkpoint 240M state files
@@ -148,6 +147,13 @@ async fn main() {
             }
         }
     };
+
+    // Create session manager with a snapshot of global orderbooks
+    let session_manager = {
+        let ob_snapshot = orderbooks.read().await.clone();
+        Arc::new(SessionManager::new(ob_snapshot))
+    };
+    tracing::info!("SessionManager initialized with {} pool orderbooks", orderbooks.read().await.len());
 
     // Build router
     let app = Router::new()
