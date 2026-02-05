@@ -45,33 +45,70 @@ The backend loads real DeepBook V3 pool state from a Snowflake checkpoint (240M)
 | DEEP/USDC | $0.0332 | — | — |
 | WAL/USDC | $0.1077 | — | — |
 
-## Quick Start
-
-```bash
-# Backend (Rust)
-cd backend
-cp .env.example .env  # Set SUI_GRPC_ENDPOINT and SUI_GRPC_API_KEY
-cargo run              # Builds MoveVM orderbooks at startup, serves on :3001
-
-# Frontend (Next.js) — not yet wired up
-cd frontend
-npm install && npm run dev
-```
+## Getting Started
 
 ### Prerequisites
 
-- Rust 1.75+
-- Node.js 20+
-- Sui gRPC endpoint (for loading Move packages at startup)
-- Pre-cached pool state files in `backend/data/` (included in repo)
+- **Rust 1.75+** ([install](https://rustup.rs))
+- **Sui gRPC API key** - needed at startup to load Move packages. Get one from the [Sui developer portal](https://sui.io/developers) or use a Mysten Labs gRPC endpoint.
 
-### Environment Variables
+### 1. Clone and configure
 
 ```bash
-# backend/.env
-SUI_GRPC_ENDPOINT=https://...
-SUI_GRPC_API_KEY=...
+git clone https://github.com/Evan-Kim2028/sandbox-deepbook.git
+cd sandbox-deepbook/backend
+
+# Set up environment
+cp .env.example .env
 ```
+
+Edit `backend/.env` and add your gRPC API key:
+
+```bash
+SUI_GRPC_ENDPOINT=https://grpc.mainnet.sui.io
+SUI_GRPC_API_KEY=your_key_here   # Required - used once at startup to fetch Move packages
+```
+
+### 2. Build and run the server
+
+```bash
+cargo run
+```
+
+On first run, Cargo will download and compile dependencies (~2-3 min). The server then:
+1. Loads pool state from `data/*.jsonl` files (included in repo, checkpoint 240M)
+2. Fetches DeepBook + Sui framework packages via gRPC (~5s)
+3. Builds orderbooks by executing `iter_orders` in the Move VM
+4. Starts serving on `http://localhost:3001`
+
+You'll see output like:
+```
+Pool registry ready: 3/3 pools loaded
+Building MoveVM orderbooks from checkpoint 240M state...
+  SUI/USDC built: 118 bids, 166 asks, mid=$1.292900
+MoveVM orderbooks built: 3 pools ready
+Starting server on 0.0.0.0:3001
+```
+
+### 3. Try a swap
+
+```bash
+# Create a trading session (gives you 100 SUI, 1000 USDC, etc.)
+curl -s -X POST http://localhost:3001/api/session \
+  -H "Content-Type: application/json" -d '{}' | jq .session_id
+
+# Get a quote: sell 10 SUI for USDC
+curl -s -X POST http://localhost:3001/api/swap/quote \
+  -H "Content-Type: application/json" \
+  -d '{"from_token": "SUI", "to_token": "USDC", "amount": "10000000000"}' | jq
+
+# Execute the swap (paste your session_id from step 1)
+curl -s -X POST http://localhost:3001/api/swap \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "YOUR_SESSION_ID", "from_token": "SUI", "to_token": "USDC", "amount": "10000000000"}' | jq
+```
+
+The `amount` field is in raw token units (10 SUI = `10000000000` since SUI has 9 decimals).
 
 ## API Endpoints
 
@@ -150,12 +187,12 @@ curl -X POST http://localhost:3001/api/swap \
 │   │   └── types/               # Error types
 │   ├── data/                    # Pre-cached pool state (checkpoint 240M)
 │   ├── examples/                # MoveVM test examples
-│   ├── scripts/                 # Snowflake export scripts
+│   ├── scripts/                 # Snowflake export scripts (Python)
 │   └── docs/                    # Architecture docs
-├── frontend/                # Next.js web application (WIP)
-├── deepbookv3/              # DeepBook V3 Move source (dependency)
-└── sui-sandbox/             # sui-sandbox fork (dependency)
+└── frontend/                # Next.js web application (WIP)
 ```
+
+Dependencies (`sui-sandbox`, `move-core-types`, etc.) are fetched automatically by Cargo from GitHub.
 
 ## Development
 
