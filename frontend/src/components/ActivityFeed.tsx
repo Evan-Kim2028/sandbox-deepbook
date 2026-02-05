@@ -75,24 +75,30 @@ export function ActivityFeed() {
                 <div>
                   <p className="font-medium">{activity.description}</p>
                   <p className="text-sm text-gray-500">
-                    <span className="text-green-400">{activity.execution_time_ms}ms</span>
-                    {' • '}
+                    {activity.execution_time_ms != null && (
+                      <>
+                        <span className="text-green-400">{activity.execution_time_ms}ms</span>
+                        {' • '}
+                      </>
+                    )}
                     {activity.timestamp.toLocaleTimeString()}
                   </p>
                 </div>
               </div>
 
-              {/* View PTB Button */}
-              <button
-                onClick={() => setSelectedActivity(activity)}
-                className="px-3 py-1.5 text-sm text-deep-blue hover:bg-deep-blue/10 rounded-lg transition-colors flex items-center gap-1"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                </svg>
-                View PTB
-              </button>
+              {/* View PTB Button — only show for swaps with PTB data */}
+              {activity.ptb_execution && (
+                <button
+                  onClick={() => setSelectedActivity(activity)}
+                  className="px-3 py-1.5 text-sm text-deep-blue hover:bg-deep-blue/10 rounded-lg transition-colors flex items-center gap-1"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                  View PTB
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -104,7 +110,7 @@ export function ActivityFeed() {
           isOpen={!!selectedActivity}
           onClose={() => setSelectedActivity(null)}
           title={selectedActivity.description}
-          ptb={selectedActivity.ptb_details}
+          ptb={selectedActivity.ptb_execution}
           executionTime={selectedActivity.execution_time_ms}
           gasUsed={selectedActivity.gas_used}
         />

@@ -1,7 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
-import type { Activity, PTBDetails } from '@/types';
+import type { Activity } from '@/types';
 
 interface ActivityStore {
   activities: Activity[];

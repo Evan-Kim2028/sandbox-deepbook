@@ -13,11 +13,14 @@ interface FaucetModalProps {
 const TOKENS = [
   { id: 'sui', name: 'SUI', amount: '10', icon: '◎', color: 'text-blue-400' },
   { id: 'usdc', name: 'USDC', amount: '100', icon: '$', color: 'text-green-400' },
+  { id: 'deep', name: 'DEEP', amount: '100', icon: 'D', color: 'text-cyan-400' },
   { id: 'wal', name: 'WAL', amount: '50', icon: 'W', color: 'text-purple-400' },
 ] as const;
 
+type FaucetToken = typeof TOKENS[number]['id'];
+
 export function FaucetModal({ isOpen, onClose }: FaucetModalProps) {
-  const [selectedToken, setSelectedToken] = useState<'sui' | 'usdc' | 'wal'>('sui');
+  const [selectedToken, setSelectedToken] = useState<FaucetToken>('sui');
   const faucet = useFaucet();
   const addActivity = useActivityStore((s) => s.addActivity);
 
@@ -29,14 +32,14 @@ export function FaucetModal({ isOpen, onClose }: FaucetModalProps) {
     try {
       const result = await faucet.mutateAsync(selectedToken);
 
-      // Add to activity feed
       addActivity({
         type: 'faucet',
         description: `Received ${token.amount} ${token.name} from faucet`,
-        execution_time_ms: result.execution_time_ms,
-        gas_used: '0', // Faucet doesn't use gas
-        ptb_details: result.ptb_details,
       });
+
+      const balanceDisplay = result.new_balance_human != null
+        ? `New balance: ${result.new_balance_human}`
+        : '';
 
       toast.success(
         <div>
@@ -44,9 +47,9 @@ export function FaucetModal({ isOpen, onClose }: FaucetModalProps) {
           <p className="text-sm text-gray-400">
             +{token.amount} {token.name}
           </p>
-          <p className="text-xs text-gray-500 mt-1">
-            {result.execution_time_ms}ms
-          </p>
+          {balanceDisplay && (
+            <p className="text-xs text-gray-500 mt-1">{balanceDisplay}</p>
+          )}
         </div>
       );
 

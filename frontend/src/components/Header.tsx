@@ -1,13 +1,18 @@
 'use client';
 
 import { useState } from 'react';
-import { useBalances } from '@/hooks/useSession';
-import { formatBalance } from '@/lib/utils';
+import { useBalances, useSession } from '@/hooks/useSession';
 import { FaucetModal } from './FaucetModal';
 
 export function Header() {
   const { balances } = useBalances();
+  const { session } = useSession();
   const [showFaucet, setShowFaucet] = useState(false);
+
+  const fmt = (val: number | undefined) =>
+    val != null
+      ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '--';
 
   return (
     <>
@@ -20,24 +25,42 @@ export function Header() {
             </div>
             <div>
               <h1 className="font-bold text-lg">DeepBook Sandbox</h1>
-              <p className="text-xs text-gray-500">SUI/USDC Pool</p>
+              <p className="text-xs text-gray-500">
+                {session?.checkpoint
+                  ? `Checkpoint ${(session.checkpoint / 1_000_000).toFixed(1)}M`
+                  : 'Sandbox'}
+              </p>
             </div>
           </div>
 
           {/* Wallet Balances */}
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-6 px-4 py-2 bg-deep-dark rounded-lg border border-deep-border">
+            <div className="flex items-center gap-4 px-4 py-2 bg-deep-dark rounded-lg border border-deep-border">
               <div className="text-right">
                 <p className="text-xs text-gray-500">SUI</p>
-                <p className="font-mono font-medium">
-                  {formatBalance(balances?.sui || '0', 9)}
+                <p className="font-mono font-medium text-sm">
+                  {fmt(balances?.sui_human)}
                 </p>
               </div>
               <div className="w-px h-8 bg-deep-border" />
               <div className="text-right">
                 <p className="text-xs text-gray-500">USDC</p>
-                <p className="font-mono font-medium">
-                  {formatBalance(balances?.usdc || '0', 6)}
+                <p className="font-mono font-medium text-sm">
+                  {fmt(balances?.usdc_human)}
+                </p>
+              </div>
+              <div className="w-px h-8 bg-deep-border" />
+              <div className="text-right">
+                <p className="text-xs text-gray-500">DEEP</p>
+                <p className="font-mono font-medium text-sm">
+                  {fmt(balances?.deep_human)}
+                </p>
+              </div>
+              <div className="w-px h-8 bg-deep-border" />
+              <div className="text-right">
+                <p className="text-xs text-gray-500">WAL</p>
+                <p className="font-mono font-medium text-sm">
+                  {fmt(balances?.wal_human)}
                 </p>
               </div>
             </div>
