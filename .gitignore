@@ -1,0 +1,23 @@
+# Build artifacts
+target/
+
+# Environment files
+.env
+*.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+.next/
+
+# Claude
+.claude/

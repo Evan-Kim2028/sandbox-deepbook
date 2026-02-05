@@ -1,0 +1,25 @@
+# Build artifacts
+/target/
+
+# Environment files with secrets
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Intermediate/temporary data files
+# (Keep only checkpoint 240M files for caching)
+data/*_feb2_2026.jsonl
+data/deepbook_state.jsonl
+data/deepbook_state_feb2_2026.jsonl
+data/sui_usdc_slices_complete.jsonl
+data/sui_usdc_state_complete.jsonl
+data/sui_usdc_state_cp149.9M.jsonl
+data/test_minimal.jsonl
