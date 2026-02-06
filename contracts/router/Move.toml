@@ -3,9 +3,7 @@ name = "DeepBookRouter"
 edition = "2024.beta"
 
 [dependencies]
-Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "mainnet-v1.64.2", override = true }
-MoveStdlib = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "mainnet-v1.64.2", override = true }
-deepbook = { local = "../../deepbookv3/packages/deepbook" }
+deepbook = { local = "../../deepbookv3/packages/deepbook", addr_subst = { deepbook = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809" } }
 
 [addresses]
 router = "0x0"

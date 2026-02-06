@@ -23,7 +23,6 @@ node_modules/
 .claude/
 
 # Cloned reference repos
-deepbookv3/
 sui-sandbox/
 
 # TypeScript build info

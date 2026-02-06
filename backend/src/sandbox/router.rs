@@ -305,40 +305,25 @@ fn deploy_router_contract(env: &mut SimulationEnvironment) -> Result<()> {
 
     tracing::info!("Router: compiling router contract...");
 
-    // Run `sui move build` to compile
-    let output = std::process::Command::new("sui")
-        .args(["move", "build", "--skip-fetch-latest-git-deps"])
+    // Compile against mainnet dependency addresses so router bytecode links to
+    // the same DeepBook package loaded into the simulation environment.
+    let out = std::process::Command::new("sui")
+        .args(["move", "build", "--environment", "mainnet"])
         .current_dir(router_dir)
-        .output();
+        .output()
+        .map_err(|e| anyhow!("Failed to run sui move build: {}", e))?;
 
-    match output {
-        Ok(out) if out.status.success() => {
-            tracing::info!("Router: contract compiled successfully");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            // Try without --skip-fetch-latest-git-deps on first build
-            tracing::info!("Router: retrying compilation with fresh deps...");
-            let out2 = std::process::Command::new("sui")
-                .args(["move", "build"])
-                .current_dir(router_dir)
-                .output()
-                .map_err(|e| anyhow!("Failed to run sui move build: {}", e))?;
-
-            if !out2.status.success() {
-                let stderr2 = String::from_utf8_lossy(&out2.stderr);
-                return Err(anyhow!(
-                    "Router contract compilation failed:\n{}\n{}",
-                    stderr,
-                    stderr2
-                ));
-            }
-            tracing::info!("Router: contract compiled successfully (fresh deps)");
-        }
-        Err(e) => {
-            return Err(anyhow!("Failed to run sui move build: {}", e));
-        }
+    if !out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!(
+            "Router contract compilation failed:\n{}\n{}",
+            stdout,
+            stderr
+        ));
     }
+
+    tracing::info!("Router: contract compiled successfully");
 
     // Read compiled bytecode from build directory
     let build_dir = router_dir.join("build/DeepBookRouter/bytecode_modules");

@@ -50,18 +50,26 @@ The backend loads real DeepBook V3 pool state from a Snowflake checkpoint (240M)
 ### Prerequisites
 
 - **Rust 1.75+** ([install](https://rustup.rs))
+- **Sui CLI 1.64+** (`sui --version`)
+- **Git with submodule support**
 
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/Evan-Kim2028/sandbox-deepbook.git
-cd sandbox-deepbook/backend
+git clone --recurse-submodules https://github.com/Evan-Kim2028/sandbox-deepbook.git
+cd sandbox-deepbook
+
+# If you cloned without --recurse-submodules (or pulled new submodule pointers)
+git submodule update --init --recursive
+
+cd backend
 
 # Set up environment (uses public Sui gRPC endpoint by default)
 cp .env.example .env
 ```
 
 The default `.env` uses `https://archive.mainnet.sui.io:443` for fetching Move packages at startup. No API key needed.
+`deepbookv3/` is a pinned git submodule and is required for router Move contract compilation.
 
 ### 2. Build and run the server
 
@@ -73,7 +81,8 @@ On first run, Cargo will download and compile dependencies (~2-3 min). The serve
 1. Loads pool state from `data/*.jsonl` files (included in repo, checkpoint 240M)
 2. Fetches DeepBook + Sui framework packages via gRPC (~5s)
 3. Builds orderbooks by executing `iter_orders` in the Move VM
-4. Starts serving on `http://localhost:3001`
+4. Compiles the local router Move contract (`contracts/router`) with `sui move build --environment mainnet`
+5. Starts serving on `http://localhost:3001`
 
 You'll see output like:
 ```
@@ -103,6 +112,13 @@ curl -s -X POST http://localhost:3001/api/swap \
 ```
 
 The `amount` field is in raw token units (10 SUI = `10000000000` since SUI has 9 decimals).
+
+## Two-Hop Quote Behavior
+
+- Two-hop quotes (`TOKEN_A -> USDC -> TOKEN_B`) try the MoveVM router first.
+- For very small inputs, DeepBook may abort in `get_quantity_out` (lot-size/rounding edge case).
+- When that happens, the API automatically falls back to Rust simulation over the same MoveVM-built orderbook snapshots.
+- Swap execution remains in the local sandbox backend flow and uses the same session/orderbook state.
 
 ## API Endpoints
 

@@ -12,7 +12,9 @@ public fun quote_two_hop<A, Q, B>(
     clock: &Clock,
 ): (u64, u64) {
     // Leg 1: Sell A for Q
-    let (quote_out, _, _) = pool::get_quote_quantity_out<A, Q>(pool_aq, input_amount, clock);
+    // get_quote_quantity_out returns (base_left, quote_out, deep_fee)
+    // We need the second value (quote_out), not the first.
+    let (_, quote_out, _) = pool::get_quote_quantity_out<A, Q>(pool_aq, input_amount, clock);
     // Leg 2: Buy B with Q
     let (base_out, _, _) = pool::get_base_quantity_out<B, Q>(pool_bq, quote_out, clock);
     (base_out, quote_out)
