@@ -5,9 +5,15 @@ import { useActivityStore } from '@/hooks/useActivityStore';
 import { PTBModal } from './PTBModal';
 import type { Activity } from '@/types';
 
+const PAGE_SIZE = 5;
+
 export function ActivityFeed() {
   const activities = useActivityStore((s) => s.activities);
   const [selectedActivity, setSelectedActivity] = useState<Activity | null>(null);
+  const [page, setPage] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(activities.length / PAGE_SIZE));
+  const pageActivities = activities.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   if (activities.length === 0) {
     return (
@@ -23,10 +29,13 @@ export function ActivityFeed() {
   return (
     <>
       <div className="bg-deep-card border border-deep-border rounded-xl p-4">
-        <h2 className="text-lg font-semibold mb-4">Transaction History</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Transaction History</h2>
+          <span className="text-sm text-gray-500">{activities.length} transactions</span>
+        </div>
 
         <div className="space-y-3">
-          {activities.map((activity) => {
+          {pageActivities.map((activity) => {
             const isTwoHop = activity.swapMeta?.route_type === 'two_hop';
 
             return (
@@ -119,6 +128,29 @@ export function ActivityFeed() {
             );
           })}
         </div>
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between mt-4 pt-3 border-t border-deep-border">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="px-3 py-1.5 text-sm rounded-lg border border-deep-border hover:bg-deep-dark disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Prev
+            </button>
+            <span className="text-sm text-gray-500">
+              Page {page + 1} of {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              className="px-3 py-1.5 text-sm rounded-lg border border-deep-border hover:bg-deep-dark disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Next
+            </button>
+          </div>
+        )}
       </div>
 
       {/* PTB Modal */}
