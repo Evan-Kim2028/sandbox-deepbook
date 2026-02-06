@@ -32,7 +32,7 @@ The backend loads real DeepBook V3 pool state from a Snowflake checkpoint (240M)
               ▼                          ▼                          ▼
      ┌────────────────┐      ┌────────────────────┐     ┌──────────────────┐
      │ GET /orderbook │      │ POST /swap/quote   │     │ POST /swap       │
-     │ depth, stats   │      │ walk price levels  │     │ execute + update │
+     │ depth, stats   │      │ MoveVM quote PTB   │     │ execute + update │
      └────────────────┘      └────────────────────┘     │ session balances │
                                                          └──────────────────┘
 ```
@@ -46,6 +46,8 @@ The backend loads real DeepBook V3 pool state from a Snowflake checkpoint (240M)
 | WAL/USDC | $0.1077 | — | — |
 
 ## Getting Started
+
+For a clean-clone reproducible flow (including troubleshooting), use `docs/RUNBOOK.md`.
 
 ### Prerequisites
 
@@ -81,8 +83,9 @@ On first run, Cargo will download and compile dependencies (~2-3 min). The serve
 1. Loads pool state from `data/*.jsonl` files (included in repo, checkpoint 240M)
 2. Fetches DeepBook + Sui framework packages via gRPC (~5s)
 3. Builds orderbooks by executing `iter_orders` in the Move VM
-4. Compiles the local router Move contract (`contracts/router`) with `sui move build --environment mainnet`
-5. Starts serving on `http://localhost:3001`
+4. Compiles and deploys the local router Move contract (`contracts/router`) with `sui move build --environment mainnet`
+5. Runs a router `quote_two_hop` health check in the local Move VM
+6. Starts serving on `http://localhost:3001`
 
 You'll see output like:
 ```
@@ -96,29 +99,51 @@ Starting server on 0.0.0.0:3001
 ### 3. Try a swap
 
 ```bash
-# Create a trading session (gives you 100 SUI, 1000 USDC, etc.)
-curl -s -X POST http://localhost:3001/api/session \
-  -H "Content-Type: application/json" -d '{}' | jq .session_id
+# Create a trading session
+SESSION_ID=$(curl -s -X POST http://localhost:3001/api/session \
+  -H "Content-Type: application/json" -d '{}' | jq -r .session_id)
+
+# Fund required balances in VM (SUI input + DEEP fee budget)
+curl -s -X POST http://localhost:3001/api/faucet \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SESSION_ID\",\"token\":\"sui\",\"amount\":\"10000000000\"}" | jq
+curl -s -X POST http://localhost:3001/api/faucet \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SESSION_ID\",\"token\":\"deep\",\"amount\":\"10000000\"}" | jq
 
 # Get a quote: sell 10 SUI for USDC
 curl -s -X POST http://localhost:3001/api/swap/quote \
   -H "Content-Type: application/json" \
   -d '{"from_token": "SUI", "to_token": "USDC", "amount": "10000000000"}' | jq
 
-# Execute the swap (paste your session_id from step 1)
+# Execute the swap
 curl -s -X POST http://localhost:3001/api/swap \
   -H "Content-Type: application/json" \
-  -d '{"session_id": "YOUR_SESSION_ID", "from_token": "SUI", "to_token": "USDC", "amount": "10000000000"}' | jq
+  -d "{\"session_id\":\"$SESSION_ID\",\"from_token\":\"SUI\",\"to_token\":\"USDC\",\"amount\":\"10000000000\"}" | jq
 ```
 
 The `amount` field is in raw token units (10 SUI = `10000000000` since SUI has 9 decimals).
 
-## Two-Hop Quote Behavior
+### Pure Local VM Full-Flow (No HTTP Server)
 
-- Two-hop quotes (`TOKEN_A -> USDC -> TOKEN_B`) try the MoveVM router first.
-- For very small inputs, DeepBook may abort in `get_quantity_out` (lot-size/rounding edge case).
-- When that happens, the API automatically falls back to Rust simulation over the same MoveVM-built orderbook snapshots.
-- Swap execution remains in the local sandbox backend flow and uses the same session/orderbook state.
+If you want to validate full integration without starting the backend service:
+
+```bash
+cd backend
+cargo run --example full_deepbook_flow
+```
+
+This runs:
+1. MoveVM orderbook build for all pools
+2. Direct swap flow (`SUI -> USDC`)
+3. Two-hop flow (`SUI -> USDC -> WAL`) with MoveVM router quote
+
+## Quote Behavior
+
+- Direct quotes (`TOKEN <-> USDC`) use MoveVM DeepBook pool view functions (`get_quote_quantity_out` / `get_base_quantity_out`).
+- Two-hop quotes (`TOKEN_A -> USDC -> TOKEN_B`) use the MoveVM router contract (`router::quote_two_hop`).
+- The backend no longer falls back to Rust orderbook-walk quote simulation.
+- For very small inputs, DeepBook can still abort due to lot-size/rounding constraints; those are returned as quote errors.
 
 ## API Endpoints
 
@@ -126,6 +151,7 @@ The `amount` field is in raw token units (10 SUI = `10000000000` since SUI has 9
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | `/api/startup-check` | Router startup self-check diagnostics |
 | POST | `/api/session` | Create a new trading session |
 | GET | `/api/session/:id` | Get session info and balances |
 | GET | `/api/session/:id/history` | View swap history |
@@ -138,7 +164,15 @@ The `amount` field is in raw token units (10 SUI = `10000000000` since SUI has 9
 | POST | `/api/swap` | Execute swap (requires session_id) |
 | POST | `/api/swap/quote` | Get quote without executing |
 | GET | `/api/balance/:session_id` | Get token balances |
-| POST | `/api/faucet` | Mint tokens into session |
+| POST | `/api/faucet` | Fund session via local MoveVM faucet PTB (`coin::split` + transfer) |
+
+### Debug Pool
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/debug/pool` | Read active debug token/pool configuration |
+| GET | `/api/debug/pools` | List created custom debug pools (current runtime supports one active pool) |
+| POST | `/api/debug/pool` | Create/ensure local-VM debug token pool (supports token metadata + seed params) |
 
 ### Orderbook
 
@@ -170,10 +204,12 @@ curl -X POST http://localhost:3001/api/swap \
 
 | Token | Amount | Decimals |
 |-------|--------|----------|
-| SUI | 100 | 9 |
-| USDC | 1,000 | 6 |
-| DEEP | 100,000 | 6 |
-| WAL | 10 | 9 |
+| SUI | 0 | 9 |
+| USDC | 0 | 6 |
+| DEEP | 0 | 6 |
+| WAL | 0 | 9 |
+
+Use `POST /api/faucet` to mint session balances through local MoveVM PTB execution.
 
 ## Project Structure
 
@@ -219,15 +255,15 @@ RUST_LOG=debug cargo run
 # Test MoveVM orderbook building for all pools
 cargo run --example test_all_pools_240m
 
-# Test swap simulation against MoveVM orderbook
-cargo run --example test_swap_simulation
+# Run full flow locally without HTTP backend
+cargo run --example full_deepbook_flow
 ```
 
 ## Key Design Decisions
 
 - **MoveVM-based orderbook**: Orders are decoded by executing DeepBook's `iter_orders` via PTB in `sui-sandbox`, not by manually parsing BCS. This guarantees correct price extraction.
 - **Static checkpoint**: Pool state comes from Snowflake at checkpoint 240M. Orderbooks are built once at startup and cached. This avoids runtime gRPC calls for pool data.
-- **Session isolation**: Each user session has independent balances. Swaps debit/credit the session without mutating the shared orderbook.
+- **Session isolation**: Each user session has independent balances. Market state for swap execution is currently shared in the VM runtime during a backend process lifetime.
 - **gRPC for packages only**: The Sui gRPC endpoint is only used at startup to load Move packages (DeepBook, Sui framework). All pool state comes from pre-cached Snowflake data.
 
 ## License

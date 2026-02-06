@@ -1,6 +1,6 @@
 # DeepBook Sandbox Backend
 
-Rust API server for simulating DeepBook V3 swaps using forked mainnet state. Builds orderbooks via MoveVM execution of DeepBook's `iter_orders` contract function at startup, then serves them over HTTP.
+Rust API server for executing DeepBook V3 swaps in a local Move VM using forked mainnet state. Builds orderbooks via MoveVM execution of DeepBook's `iter_orders` contract function at startup, then serves them over HTTP.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ At startup, the server:
 2. Fetches Move packages (DeepBook V3, Sui framework) via Sui gRPC
 3. For each pool, creates a `sui-sandbox` `SimulationEnvironment`, loads all objects, and executes `iter_orders` via PTB to extract orders
 4. Caches the resulting `SandboxOrderbook` (price levels with quantities) in memory
-5. Serves orderbook data, swap quotes, and session-based trading over HTTP
+5. Serves orderbook data, MoveVM-backed swap quotes, and session-based trading over HTTP
 
 The key insight is that DeepBook stores orders in a `BigVector` with BCS-encoded entries. Rather than manually parsing this, we let the Move VM decode orders correctly by calling the contract's own `iter_orders` function.
 
@@ -26,12 +26,31 @@ cargo run
 # Server starts on http://localhost:3001
 ```
 
+Router compile/deploy is a required startup step. If router build or the local-VM router health check fails, backend startup exits with an error.
+Use `../docs/RUNBOOK.md` for clean setup + troubleshooting playbook.
+
+## Pure Local VM Flow (No HTTP Server)
+
+Run the full DeepBook flow directly in-process:
+
+```bash
+cargo run --example full_deepbook_flow
+```
+
+This validates:
+
+1. JSONL state loading for all pools
+2. MoveVM orderbook build via `iter_orders`
+3. Session creation and direct swap (`SUI -> USDC`)
+4. Two-hop flow (`SUI -> USDC -> WAL`) with MoveVM router quoting
+
 ## API Endpoints
 
 ### Health
 
 ```
 GET /health → "ok"
+GET /api/startup-check → startup self-check JSON
 ```
 
 ### Sessions
@@ -46,11 +65,19 @@ POST /api/session/:id/reset → Reset balances to initial state
 ### Trading
 
 ```
-POST /api/swap/quote        → Get quote (walks MoveVM orderbook, no session needed)
+POST /api/swap/quote        → Get quote (MoveVM PTB: pool views for direct, router for two-hop)
 POST /api/swap              → Execute swap (requires session_id, updates balances)
 GET  /api/balance/:id       → Get token balances for session
-POST /api/faucet            → Mint tokens into session
+POST /api/faucet            → Fund session via local MoveVM faucet PTB (coin split + transfer)
+GET  /api/debug/pool        → Read active debug pool/token config
+GET  /api/debug/pools       → List created debug pools
+POST /api/debug/pool        → Create+seed debug token/USDC pool (supports token metadata + seed params)
 ```
+
+Notes:
+
+- Sessions start with zero balances.
+- Fund `DEEP` for routes that require fee budget during swap execution.
 
 ### Orderbook
 
@@ -71,7 +98,7 @@ src/
 │   ├── mod.rs                   # Router, AppState (pool_registry, session_manager, orderbooks)
 │   ├── session.rs               # Session CRUD endpoints
 │   ├── balance.rs               # Balance queries + faucet
-│   ├── swap.rs                  # Quote calculation (orderbook walk) + swap execution
+│   ├── swap.rs                  # MoveVM quote calls + swap execution
 │   └── orderbook.rs             # Orderbook snapshot, depth, stats endpoints
 ├── sandbox/
 │   ├── orderbook_builder.rs     # SimulationEnvironment + iter_orders PTB execution
@@ -100,11 +127,11 @@ To export fresh state, see `scripts/export_state_240m.py`.
 # Build and verify all three pool orderbooks via MoveVM
 cargo run --example test_all_pools_240m
 
-# Test swap simulation (walks orderbook, calculates output amounts)
-cargo run --example test_swap_simulation
-
 # Test single pool orderbook build
 cargo run --example test_orderbook
+
+# Run full local flow without starting the HTTP server
+cargo run --example full_deepbook_flow
 ```
 
 ## Development
