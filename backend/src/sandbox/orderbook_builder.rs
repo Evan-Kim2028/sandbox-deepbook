@@ -923,7 +923,7 @@ impl OrderbookBuilder {
 }
 
 /// Build Pool<BaseAsset, QuoteAsset> TypeTag
-fn build_pool_type_tag(base_type: &str, quote_type: &str) -> Result<TypeTag> {
+pub fn build_pool_type_tag(base_type: &str, quote_type: &str) -> Result<TypeTag> {
     let base_tag = TypeTag::from_str(base_type)?;
     let quote_tag = TypeTag::from_str(quote_type)?;
 

@@ -15,7 +15,7 @@ use super::state_loader::PoolId;
 // Initial balances for new sessions
 const INITIAL_SUI: u64 = 100_000_000_000; // 100 SUI
 const INITIAL_USDC: u64 = 1_000_000_000; // 1000 USDC
-const INITIAL_DEEP: u64 = 100_000_000_000; // 100,000 DEEP
+const INITIAL_DEEP: u64 = 100_000_000; // 100 DEEP
 const INITIAL_WAL: u64 = 10_000_000_000; // 10 WAL
 
 // DeepBook V3 Package
@@ -265,9 +265,18 @@ impl TradingSession {
                 event_type: format!("{}::pool::OrderFilled", DEEPBOOK_PACKAGE),
                 data: serde_json::json!({
                     "pool_id": pool_id.display_name(),
+                    "direction": if is_sell_base { format!("Sell {} for {}", from_token, to_token) } else { format!("Buy {} with {}", to_token, from_token) },
                     "taker_is_bid": !is_sell_base,
+                    "base_token": if is_sell_base { from_token } else { to_token },
+                    "quote_token": "USDC",
                     "base_quantity": if is_sell_base { input_amount } else { output_amount },
                     "quote_quantity": if is_sell_base { output_amount } else { input_amount },
+                    "base_quantity_human": if is_sell_base {
+                        format!("{:.4}", input_amount as f64 / 10f64.powi(_base_decimals as i32))
+                    } else {
+                        format!("{:.4}", output_amount as f64 / 10f64.powi(_base_decimals as i32))
+                    },
+                    "quote_quantity_human": format!("{:.2}", if is_sell_base { output_amount } else { input_amount } as f64 / 1_000_000.0),
                 }),
             }],
             created_objects: vec![],
@@ -293,6 +302,164 @@ impl TradingSession {
         };
 
         // Add to history
+        self.swap_history.push(result.clone());
+
+        Ok(result)
+    }
+
+    /// Execute a two-hop swap: from_token -> USDC -> to_token
+    ///
+    /// Both legs are pre-calculated. This method updates balances and builds
+    /// the PTB execution info showing a router::swap_two_hop call.
+    pub fn execute_two_hop_swap(
+        &mut self,
+        first_pool: PoolId,
+        second_pool: PoolId,
+        from_token: &str,
+        to_token: &str,
+        input_amount: u64,
+        intermediate_usdc: u64,
+        output_amount: u64,
+        effective_price: f64,
+    ) -> Result<SwapResult> {
+        let start = std::time::Instant::now();
+
+        // Validate balance
+        if self.balances.get(from_token) < input_amount {
+            return Ok(SwapResult {
+                success: false,
+                error: Some(format!(
+                    "Insufficient {} balance: have {}, need {}",
+                    from_token,
+                    self.balances.get(from_token),
+                    input_amount
+                )),
+                input_token: from_token.to_string(),
+                output_token: to_token.to_string(),
+                input_amount,
+                output_amount: 0,
+                effective_price: 0.0,
+                gas_used: 0,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                ptb_execution: PtbExecution {
+                    commands: vec![],
+                    status: "Failed: Insufficient balance".to_string(),
+                    effects_digest: None,
+                    events: vec![],
+                    created_objects: vec![],
+                    mutated_objects: vec![],
+                    deleted_objects: vec![],
+                },
+                balances_after: self.balances.clone(),
+            });
+        }
+
+        // Get type info for both pools
+        let (first_base_type, _, first_base_decimals) = match first_pool {
+            PoolId::SuiUsdc => (SUI_TYPE, USDC_TYPE, 9u8),
+            PoolId::DeepUsdc => (DEEP_TYPE, USDC_TYPE, 6u8),
+            PoolId::WalUsdc => (WAL_TYPE, USDC_TYPE, 9u8),
+        };
+        let (second_base_type, _, second_base_decimals) = match second_pool {
+            PoolId::SuiUsdc => (SUI_TYPE, USDC_TYPE, 9u8),
+            PoolId::DeepUsdc => (DEEP_TYPE, USDC_TYPE, 6u8),
+            PoolId::WalUsdc => (WAL_TYPE, USDC_TYPE, 9u8),
+        };
+
+        // Update balances atomically
+        self.balances.subtract(from_token, input_amount)?;
+        self.balances.add(to_token, output_amount);
+
+        let execution_time = start.elapsed().as_millis() as u64;
+
+        // Build PTB execution info showing atomic router call
+        let ptb_execution = PtbExecution {
+            commands: vec![
+                CommandInfo {
+                    index: 0,
+                    command_type: "SplitCoins".to_string(),
+                    package: SUI_FRAMEWORK.to_string(),
+                    module: "coin".to_string(),
+                    function: "split".to_string(),
+                    type_args: vec![first_base_type.to_string()],
+                },
+                CommandInfo {
+                    index: 1,
+                    command_type: "MoveCall".to_string(),
+                    package: "router".to_string(),
+                    module: "router".to_string(),
+                    function: "swap_two_hop".to_string(),
+                    type_args: vec![
+                        first_base_type.to_string(),
+                        USDC_TYPE.to_string(),
+                        second_base_type.to_string(),
+                    ],
+                },
+                CommandInfo {
+                    index: 2,
+                    command_type: "TransferObjects".to_string(),
+                    package: SUI_FRAMEWORK.to_string(),
+                    module: "transfer".to_string(),
+                    function: "public_transfer".to_string(),
+                    type_args: vec![second_base_type.to_string()],
+                },
+            ],
+            status: "Success".to_string(),
+            effects_digest: Some(format!("SimDigest_{}", uuid::Uuid::new_v4())),
+            events: vec![
+                EventInfo {
+                    event_type: format!("{}::pool::OrderFilled", DEEPBOOK_PACKAGE),
+                    data: serde_json::json!({
+                        "pool_id": first_pool.display_name(),
+                        "leg": "first",
+                        "direction": format!("Sell {} for USDC", from_token),
+                        "taker_is_bid": false,
+                        "base_token": from_token,
+                        "quote_token": "USDC",
+                        "base_quantity": input_amount,
+                        "quote_quantity": intermediate_usdc,
+                        "base_quantity_human": format!("{:.4}", input_amount as f64 / 10f64.powi(first_base_decimals as i32)),
+                        "quote_quantity_human": format!("{:.2}", intermediate_usdc as f64 / 1_000_000.0),
+                    }),
+                },
+                EventInfo {
+                    event_type: format!("{}::pool::OrderFilled", DEEPBOOK_PACKAGE),
+                    data: serde_json::json!({
+                        "pool_id": second_pool.display_name(),
+                        "leg": "second",
+                        "direction": format!("Buy {} with USDC", to_token),
+                        "taker_is_bid": true,
+                        "base_token": to_token,
+                        "quote_token": "USDC",
+                        "base_quantity": output_amount,
+                        "quote_quantity": intermediate_usdc,
+                        "base_quantity_human": format!("{:.4}", output_amount as f64 / 10f64.powi(second_base_decimals as i32)),
+                        "quote_quantity_human": format!("{:.2}", intermediate_usdc as f64 / 1_000_000.0),
+                    }),
+                },
+            ],
+            created_objects: vec![],
+            mutated_objects: vec![
+                format!("UserCoin<{}>", from_token),
+                format!("UserCoin<{}>", to_token),
+            ],
+            deleted_objects: vec![],
+        };
+
+        let result = SwapResult {
+            success: true,
+            error: None,
+            input_token: from_token.to_string(),
+            output_token: to_token.to_string(),
+            input_amount,
+            output_amount,
+            effective_price,
+            gas_used: 2_500_000, // Higher gas for two-hop
+            execution_time_ms: execution_time,
+            ptb_execution,
+            balances_after: self.balances.clone(),
+        };
+
         self.swap_history.push(result.clone());
 
         Ok(result)

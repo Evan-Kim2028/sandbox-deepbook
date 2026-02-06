@@ -16,6 +16,7 @@ mod swap;
 pub use orderbook::SharedPoolRegistry;
 
 use crate::sandbox::orderbook_builder::SandboxOrderbook;
+use crate::sandbox::router::RouterHandle;
 use crate::sandbox::state_loader::{PoolId, PoolRegistry};
 use crate::sandbox::swap_executor::SessionManager;
 
@@ -28,6 +29,7 @@ pub struct AppState {
     pub pool_registry: SharedPoolRegistry,
     pub session_manager: Arc<SessionManager>,
     pub orderbooks: SharedOrderbooks,
+    pub router: Option<RouterHandle>,
 }
 
 impl AppState {
@@ -35,11 +37,13 @@ impl AppState {
         pool_registry: Arc<RwLock<PoolRegistry>>,
         session_manager: Arc<SessionManager>,
         orderbooks: SharedOrderbooks,
+        router: Option<RouterHandle>,
     ) -> Self {
         Self {
             pool_registry,
             session_manager,
             orderbooks,
+            router,
         }
     }
 }
@@ -49,8 +53,9 @@ pub fn router(
     pool_registry: SharedPoolRegistry,
     session_manager: Arc<SessionManager>,
     orderbooks: SharedOrderbooks,
+    router_handle: Option<RouterHandle>,
 ) -> Router {
-    let app_state = AppState::new(pool_registry, session_manager, orderbooks);
+    let app_state = AppState::new(pool_registry, session_manager, orderbooks, router_handle);
 
     Router::new()
         // Session management

@@ -8,6 +8,7 @@
 //! - Calling DeepBook view functions via Move VM
 
 pub mod orderbook_builder;
+pub mod router;
 pub mod snowflake_bcs;
 pub mod state_loader;
 pub mod swap_executor;

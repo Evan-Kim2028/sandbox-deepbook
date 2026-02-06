@@ -1,7 +1,8 @@
 //! Swap execution endpoints using Move VM
 //!
 //! Provides swap quotes and execution by walking the MoveVM-built
-//! SandboxOrderbook price levels.
+//! SandboxOrderbook price levels. Supports cross-pool routes via
+//! the router thread for two-hop swaps (e.g., SUI -> USDC -> WAL).
 
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,11 @@ pub struct SwapResponse {
     pub message: String,
     pub ptb_execution: PtbExecutionInfo,
     pub balances_after: BalancesAfter,
+    /// "direct" for single-pool, "two_hop" for cross-pool
+    pub route_type: String,
+    /// USDC intermediate amount for two-hop routes (human-readable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intermediate_amount: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,9 +131,25 @@ pub struct QuoteResponse {
     pub orders_matched: usize,
     pub fully_fillable: bool,
     pub route: String,
+    /// "direct" for single-pool, "two_hop" for cross-pool
+    pub route_type: String,
+    /// USDC intermediate amount for two-hop routes (human-readable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intermediate_amount: Option<f64>,
 }
 
-/// Determine which pool to use based on tokens
+/// Route classification for a swap
+enum Route {
+    /// Direct single-pool swap (e.g., SUI <-> USDC)
+    SinglePool(PoolId),
+    /// Two-hop swap via USDC intermediate (e.g., SUI -> USDC -> WAL)
+    TwoHop {
+        first_pool: PoolId,
+        second_pool: PoolId,
+    },
+}
+
+/// Determine which pool to use based on tokens (single-pool only)
 fn determine_pool(from: &str, to: &str) -> Option<PoolId> {
     let tokens = [from.to_uppercase(), to.to_uppercase()];
     let has_usdc = tokens.iter().any(|t| t == "USDC");
@@ -147,6 +169,41 @@ fn determine_pool(from: &str, to: &str) -> Option<PoolId> {
         }
     }
     None
+}
+
+/// Determine the route for a swap, including two-hop routes
+fn determine_route(from: &str, to: &str) -> Option<Route> {
+    let from_upper = from.to_uppercase();
+    let to_upper = to.to_uppercase();
+
+    // If one side is USDC, it's a single-pool swap
+    if from_upper == "USDC" || to_upper == "USDC" {
+        return determine_pool(from, to).map(Route::SinglePool);
+    }
+
+    // Neither side is USDC -> two-hop via USDC
+    let first_pool = pool_for_base(&from_upper)?;
+    let second_pool = pool_for_base(&to_upper)?;
+
+    // Don't allow same-token swaps
+    if first_pool == second_pool {
+        return None;
+    }
+
+    Some(Route::TwoHop {
+        first_pool,
+        second_pool,
+    })
+}
+
+/// Get the USDC pool for a given base token
+fn pool_for_base(token: &str) -> Option<PoolId> {
+    match token {
+        "SUI" => Some(PoolId::SuiUsdc),
+        "WAL" => Some(PoolId::WalUsdc),
+        "DEEP" => Some(PoolId::DeepUsdc),
+        _ => None,
+    }
 }
 
 /// Calculate swap quote by walking the MoveVM-built SandboxOrderbook
@@ -284,14 +341,10 @@ pub async fn execute_swap(
         return Err(ApiError::BadRequest("Cannot swap same token".into()));
     }
 
-    // Determine pool
-    let pool_id = match &req.pool {
-        Some(p) => PoolId::from_str(p)
-            .ok_or_else(|| ApiError::BadRequest(format!("Invalid pool: {}", p)))?,
-        None => determine_pool(&from, &to).ok_or_else(|| {
-            ApiError::BadRequest(format!("No pool found for {} <-> {}", from, to))
-        })?,
-    };
+    // Determine route
+    let route = determine_route(&from, &to).ok_or_else(|| {
+        ApiError::BadRequest(format!("No route found for {} -> {}", from, to))
+    })?;
 
     // Get session
     let session_arc = state
@@ -306,19 +359,34 @@ pub async fn execute_swap(
         .parse()
         .map_err(|_| ApiError::BadRequest("Invalid amount".into()))?;
 
-    // Determine if selling base (SUI/DEEP/WAL) or buying base
+    match route {
+        Route::SinglePool(pool_id) => {
+            execute_single_pool_swap(&state, session_arc, pool_id, &from, &to, amount, start).await
+        }
+        Route::TwoHop { first_pool, second_pool } => {
+            execute_two_hop_swap(&state, session_arc, first_pool, second_pool, &from, &to, amount, start).await
+        }
+    }
+}
+
+/// Execute a single-pool swap (existing logic)
+async fn execute_single_pool_swap(
+    _state: &AppState,
+    session_arc: std::sync::Arc<tokio::sync::RwLock<crate::sandbox::swap_executor::TradingSession>>,
+    pool_id: PoolId,
+    from: &str,
+    to: &str,
+    amount: u64,
+    start: std::time::Instant,
+) -> ApiResult<Json<SwapResponse>> {
     let is_sell = from != "USDC";
 
-    // Use the session's per-session orderbook for quoting and liquidity consumption
     let mut session = session_arc.write().await;
     let ob = session.orderbooks.get(&pool_id).ok_or_else(|| {
         ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
     })?;
 
-    // Calculate quote using session's orderbook walk
     let quote = calculate_quote(ob, amount, is_sell);
-
-    // Calculate mid price and price impact
     let mid_price = ob.mid_price().unwrap_or(0.0);
 
     let price_impact_bps = if mid_price > 0.0 {
@@ -327,17 +395,10 @@ pub async fn execute_swap(
         0
     };
 
-    // Execute swap in session (update balances with pre-calculated output)
     let result = session.execute_swap(
-        pool_id,
-        &from,
-        &to,
-        amount,
-        quote.output_amount,
-        quote.effective_price,
+        pool_id, from, to, amount, quote.output_amount, quote.effective_price,
     );
 
-    // Consume liquidity from the session's orderbook on success
     if result.as_ref().map(|r| r.success).unwrap_or(false) {
         if let Some(session_ob) = session.orderbooks.get_mut(&pool_id) {
             session_ob.consume_liquidity(amount, is_sell);
@@ -347,18 +408,16 @@ pub async fn execute_swap(
     match result {
         Ok(swap_result) => {
             let execution_time = start.elapsed().as_millis() as u64;
-            let from_decimals = get_decimals(&from);
-            let to_decimals = get_decimals(&to);
+            let from_decimals = get_decimals(from);
+            let to_decimals = get_decimals(to);
             let input_human = format_human(amount, from_decimals);
             let output_human = format_human(swap_result.output_amount, to_decimals);
 
-            // Format user-friendly message
             let message = format!(
                 "Successfully traded {:.4} {} for {:.4} {} @ ${:.6}",
                 input_human, from, output_human, to, swap_result.effective_price
             );
 
-            // Format PTB commands with descriptions
             let commands: Vec<CommandDetail> = swap_result
                 .ptb_execution
                 .commands
@@ -388,7 +447,7 @@ pub async fn execute_swap(
                 .collect();
 
             let summary = format!(
-                "PTB executed {} commands: split input coin → swap via DeepBook {} pool → transfer output. Matched {} orders across {} price levels.",
+                "PTB executed {} commands: split input coin -> swap via DeepBook {} pool -> transfer output. Matched {} orders across {} price levels.",
                 commands.len(),
                 pool_id.display_name(),
                 quote.orders_matched,
@@ -398,8 +457,8 @@ pub async fn execute_swap(
             Ok(Json(SwapResponse {
                 success: true,
                 error: None,
-                input_token: from,
-                output_token: to,
+                input_token: from.to_string(),
+                output_token: to.to_string(),
                 input_amount: amount.to_string(),
                 input_amount_human: input_human,
                 output_amount: swap_result.output_amount.to_string(),
@@ -426,6 +485,8 @@ pub async fn execute_swap(
                     summary,
                 },
                 balances_after: BalancesAfter::from(&swap_result.balances_after),
+                route_type: "direct".to_string(),
+                intermediate_amount: None,
             }))
         }
         Err(e) => {
@@ -433,10 +494,10 @@ pub async fn execute_swap(
             Ok(Json(SwapResponse {
                 success: false,
                 error: Some(e.to_string()),
-                input_token: from.clone(),
-                output_token: to.clone(),
+                input_token: from.to_string(),
+                output_token: to.to_string(),
                 input_amount: amount.to_string(),
-                input_amount_human: format_human(amount, get_decimals(&from)),
+                input_amount_human: format_human(amount, get_decimals(from)),
                 output_amount: "0".to_string(),
                 output_amount_human: 0.0,
                 effective_price: 0.0,
@@ -453,6 +514,201 @@ pub async fn execute_swap(
                     summary: format!("Transaction aborted: {}", e),
                 },
                 balances_after: BalancesAfter::from(&session.balances),
+                route_type: "direct".to_string(),
+                intermediate_amount: None,
+            }))
+        }
+    }
+}
+
+/// Execute a two-hop swap: from_token -> USDC -> to_token
+/// Chains two orderbook walks atomically, consuming liquidity from both pools.
+async fn execute_two_hop_swap(
+    _state: &AppState,
+    session_arc: std::sync::Arc<tokio::sync::RwLock<crate::sandbox::swap_executor::TradingSession>>,
+    first_pool: PoolId,
+    second_pool: PoolId,
+    from: &str,
+    to: &str,
+    amount: u64,
+    start: std::time::Instant,
+) -> ApiResult<Json<SwapResponse>> {
+    let mut session = session_arc.write().await;
+
+    // Leg 1: Sell from_token for USDC (sell base on first pool)
+    let first_ob = session.orderbooks.get(&first_pool).ok_or_else(|| {
+        ApiError::BadRequest(format!("Pool {} orderbook not built", first_pool.display_name()))
+    })?;
+    let leg1_quote = calculate_quote(first_ob, amount, true); // sell base for quote
+
+    if leg1_quote.output_amount == 0 {
+        return Err(ApiError::BadRequest("No liquidity on first leg".into()));
+    }
+
+    // Leg 2: Buy to_token with USDC (buy base on second pool)
+    let second_ob = session.orderbooks.get(&second_pool).ok_or_else(|| {
+        ApiError::BadRequest(format!("Pool {} orderbook not built", second_pool.display_name()))
+    })?;
+    let leg2_quote = calculate_quote(second_ob, leg1_quote.output_amount, false); // buy base with quote
+
+    if leg2_quote.output_amount == 0 {
+        return Err(ApiError::BadRequest("No liquidity on second leg".into()));
+    }
+
+    // Calculate effective price and impact
+    let from_decimals = get_decimals(from);
+    let to_decimals = get_decimals(to);
+    let input_human = format_human(amount, from_decimals);
+    let output_human = format_human(leg2_quote.output_amount, to_decimals);
+    let usdc_intermediate_human = leg1_quote.output_amount as f64 / 1_000_000.0;
+
+    let effective_price = if input_human > 0.0 {
+        output_human / input_human
+    } else {
+        0.0
+    };
+
+    // Estimate price impact from both legs
+    let first_mid = session.orderbooks.get(&first_pool).and_then(|ob| ob.mid_price()).unwrap_or(0.0);
+    let second_mid = session.orderbooks.get(&second_pool).and_then(|ob| ob.mid_price()).unwrap_or(0.0);
+    let ideal_output = if first_mid > 0.0 && second_mid > 0.0 {
+        let usdc_ideal = input_human * first_mid;
+        usdc_ideal / second_mid
+    } else {
+        0.0
+    };
+    let price_impact_bps = if ideal_output > 0.0 {
+        ((ideal_output - output_human).abs() / ideal_output * 10_000.0) as u32
+    } else {
+        0
+    };
+
+    // Execute the swap: debit from_token, credit to_token
+    let result = session.execute_two_hop_swap(
+        first_pool,
+        second_pool,
+        from,
+        to,
+        amount,
+        leg1_quote.output_amount,
+        leg2_quote.output_amount,
+        effective_price,
+    );
+
+    // Consume liquidity from both session orderbooks on success
+    if result.as_ref().map(|r| r.success).unwrap_or(false) {
+        if let Some(ob1) = session.orderbooks.get_mut(&first_pool) {
+            ob1.consume_liquidity(amount, true); // sell base
+        }
+        if let Some(ob2) = session.orderbooks.get_mut(&second_pool) {
+            ob2.consume_liquidity(leg1_quote.output_amount, false); // buy base with quote
+        }
+    }
+
+    match result {
+        Ok(swap_result) => {
+            let execution_time = start.elapsed().as_millis() as u64;
+
+            let message = format!(
+                "Successfully traded {:.4} {} -> {:.2} USDC -> {:.4} {} (two-hop)",
+                input_human, from, usdc_intermediate_human, output_human, to
+            );
+
+            let commands: Vec<CommandDetail> = swap_result
+                .ptb_execution
+                .commands
+                .iter()
+                .map(|cmd| {
+                    let description = match cmd.function.as_str() {
+                        "split" => format!("Split {} coin for exact input amount", from),
+                        "swap_two_hop" => format!(
+                            "Execute two-hop swap: {} -> USDC -> {} via router",
+                            from, to
+                        ),
+                        "public_transfer" => format!("Transfer output {} to sender", to),
+                        _ => format!("{}::{}", cmd.module, cmd.function),
+                    };
+                    CommandDetail {
+                        index: cmd.index,
+                        command_type: cmd.command_type.clone(),
+                        package: cmd.package.clone(),
+                        module: cmd.module.clone(),
+                        function: cmd.function.clone(),
+                        type_args: cmd.type_args.clone(),
+                        description,
+                    }
+                })
+                .collect();
+
+            let summary = format!(
+                "PTB executed {} commands: split input -> router::swap_two_hop({} -> USDC -> {}) -> transfer output. Matched {} orders across {} price levels.",
+                commands.len(), from, to,
+                leg1_quote.orders_matched + leg2_quote.orders_matched,
+                leg1_quote.levels_consumed + leg2_quote.levels_consumed
+            );
+
+            Ok(Json(SwapResponse {
+                success: true,
+                error: None,
+                input_token: from.to_string(),
+                output_token: to.to_string(),
+                input_amount: amount.to_string(),
+                input_amount_human: input_human,
+                output_amount: swap_result.output_amount.to_string(),
+                output_amount_human: output_human,
+                effective_price: swap_result.effective_price,
+                price_impact_bps,
+                gas_used: swap_result.gas_used.to_string(),
+                execution_time_ms: execution_time,
+                execution_method: "Move VM Router Two-Hop PTB Execution".to_string(),
+                message,
+                ptb_execution: PtbExecutionInfo {
+                    commands,
+                    status: swap_result.ptb_execution.status,
+                    effects_digest: swap_result.ptb_execution.effects_digest,
+                    events: swap_result
+                        .ptb_execution
+                        .events
+                        .iter()
+                        .map(|e| EventDetail {
+                            event_type: e.event_type.clone(),
+                            data: e.data.clone(),
+                        })
+                        .collect(),
+                    summary,
+                },
+                balances_after: BalancesAfter::from(&swap_result.balances_after),
+                route_type: "two_hop".to_string(),
+                intermediate_amount: Some(usdc_intermediate_human),
+            }))
+        }
+        Err(e) => {
+            let execution_time = start.elapsed().as_millis() as u64;
+            Ok(Json(SwapResponse {
+                success: false,
+                error: Some(e.to_string()),
+                input_token: from.to_string(),
+                output_token: to.to_string(),
+                input_amount: amount.to_string(),
+                input_amount_human: format_human(amount, get_decimals(from)),
+                output_amount: "0".to_string(),
+                output_amount_human: 0.0,
+                effective_price: 0.0,
+                price_impact_bps: 0,
+                gas_used: "0".to_string(),
+                execution_time_ms: execution_time,
+                execution_method: "Move VM Router Two-Hop PTB Execution".to_string(),
+                message: format!("Two-hop swap failed: {}", e),
+                ptb_execution: PtbExecutionInfo {
+                    commands: vec![],
+                    status: "Failed".to_string(),
+                    effects_digest: None,
+                    events: vec![],
+                    summary: format!("Two-hop transaction aborted: {}", e),
+                },
+                balances_after: BalancesAfter::from(&session.balances),
+                route_type: "two_hop".to_string(),
+                intermediate_amount: None,
             }))
         }
     }
@@ -470,32 +726,51 @@ pub async fn get_quote(
         return Err(ApiError::BadRequest("Cannot swap same token".into()));
     }
 
-    // Determine pool
-    let pool_id = match &req.pool {
-        Some(p) => PoolId::from_str(p)
-            .ok_or_else(|| ApiError::BadRequest(format!("Invalid pool: {}", p)))?,
-        None => determine_pool(&from, &to).ok_or_else(|| {
-            ApiError::BadRequest(format!("No pool found for {} <-> {}", from, to))
-        })?,
-    };
-
     // Parse amount
     let amount: u64 = req
         .amount
         .parse()
         .map_err(|_| ApiError::BadRequest("Invalid amount".into()))?;
 
-    // Determine if selling base or buying base
+    // Determine route
+    let route = if let Some(ref p) = req.pool {
+        // Explicit pool overrides route detection
+        let pool_id = PoolId::from_str(p)
+            .ok_or_else(|| ApiError::BadRequest(format!("Invalid pool: {}", p)))?;
+        Route::SinglePool(pool_id)
+    } else {
+        determine_route(&from, &to).ok_or_else(|| {
+            ApiError::BadRequest(format!("No route found for {} -> {}", from, to))
+        })?
+    };
+
+    match route {
+        Route::SinglePool(pool_id) => {
+            get_single_pool_quote(&state, pool_id, &from, &to, amount, &req).await
+        }
+        Route::TwoHop { first_pool, second_pool } => {
+            get_two_hop_quote(&state, first_pool, second_pool, &from, &to, amount, &req).await
+        }
+    }
+}
+
+/// Quote for a single-pool swap (existing logic)
+async fn get_single_pool_quote(
+    state: &AppState,
+    pool_id: PoolId,
+    from: &str,
+    to: &str,
+    amount: u64,
+    req: &QuoteRequest,
+) -> ApiResult<Json<QuoteResponse>> {
     let is_sell = from != "USDC";
 
-    // Try to use session-specific orderbook if session_id provided
     let session_arc = if let Some(ref sid) = req.session_id {
         state.session_manager.get_session(sid).await
     } else {
         None
     };
 
-    // Helper struct to hold quote results so we can compute them in a scoped block
     struct QuoteResult {
         quote: QuoteCalculation,
         mid_price: f64,
@@ -503,7 +778,6 @@ pub async fn get_quote(
     }
 
     let qr = if let Some(ref session_arc) = session_arc {
-        // Session-specific orderbook (reflects consumed liquidity)
         let session = session_arc.read().await;
         let ob = session.orderbooks.get(&pool_id).ok_or_else(|| {
             ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
@@ -514,7 +788,6 @@ pub async fn get_quote(
             base_scale: 10f64.powi(ob.base_decimals as i32),
         }
     } else {
-        // Global orderbook (default for pre-session quotes)
         let orderbooks = state.orderbooks.read().await;
         let ob = orderbooks.get(&pool_id).ok_or_else(|| {
             ApiError::BadRequest(format!("Pool {} orderbook not built", pool_id.display_name()))
@@ -543,9 +816,9 @@ pub async fn get_quote(
         success: true,
         error: None,
         pool: pool_id.display_name().to_string(),
-        input_token: from.clone(),
-        output_token: to.clone(),
-        input_amount: req.amount.clone(),
+        input_token: from.to_string(),
+        output_token: to.to_string(),
+        input_amount: amount.to_string(),
         input_amount_human: input_human,
         estimated_output: qr.quote.output_amount.to_string(),
         estimated_output_human: qr.quote.output_human,
@@ -556,5 +829,167 @@ pub async fn get_quote(
         orders_matched: qr.quote.orders_matched,
         fully_fillable: qr.quote.fully_filled,
         route: format!("{} -> DeepBook {} -> {}", from, pool_id.display_name(), to),
+        route_type: "direct".to_string(),
+        intermediate_amount: None,
+    }))
+}
+
+/// Quote for a two-hop swap: from_token -> USDC -> to_token
+async fn get_two_hop_quote(
+    state: &AppState,
+    first_pool: PoolId,
+    second_pool: PoolId,
+    from: &str,
+    to: &str,
+    amount: u64,
+    req: &QuoteRequest,
+) -> ApiResult<Json<QuoteResponse>> {
+    // Try MoveVM router first, fall back to Rust simulation
+    if let Some(ref router) = state.router {
+        match router.quote_two_hop(first_pool, second_pool, amount).await {
+            Ok(router_quote) => {
+                let from_decimals = get_decimals(from);
+                let to_decimals = get_decimals(to);
+                let input_human = format_human(amount, from_decimals);
+                let output_human = format_human(router_quote.final_output, to_decimals);
+                let usdc_human = router_quote.intermediate_amount as f64 / 1_000_000.0;
+
+                let effective_price = if input_human > 0.0 {
+                    output_human / input_human
+                } else {
+                    0.0
+                };
+
+                // Estimate mid price from both pools
+                let orderbooks = state.orderbooks.read().await;
+                let first_mid = orderbooks.get(&first_pool).and_then(|ob| ob.mid_price()).unwrap_or(0.0);
+                let second_mid = orderbooks.get(&second_pool).and_then(|ob| ob.mid_price()).unwrap_or(0.0);
+                let mid_price = if first_mid > 0.0 && second_mid > 0.0 {
+                    first_mid / second_mid
+                } else {
+                    0.0
+                };
+                let price_impact_bps = if mid_price > 0.0 {
+                    ((effective_price - mid_price).abs() / mid_price * 10_000.0) as u32
+                } else {
+                    0
+                };
+
+                return Ok(Json(QuoteResponse {
+                    success: true,
+                    error: None,
+                    pool: format!("{} + {}", first_pool.display_name(), second_pool.display_name()),
+                    input_token: from.to_string(),
+                    output_token: to.to_string(),
+                    input_amount: amount.to_string(),
+                    input_amount_human: input_human,
+                    estimated_output: router_quote.final_output.to_string(),
+                    estimated_output_human: output_human,
+                    effective_price,
+                    mid_price,
+                    price_impact_bps,
+                    levels_consumed: 0,
+                    orders_matched: 0,
+                    fully_fillable: router_quote.final_output > 0,
+                    route: format!(
+                        "{} -> DeepBook {} -> USDC -> DeepBook {} -> {}",
+                        from, first_pool.display_name(), second_pool.display_name(), to
+                    ),
+                    route_type: "two_hop".to_string(),
+                    intermediate_amount: Some(usdc_human),
+                }));
+            }
+            Err(e) => {
+                tracing::warn!("MoveVM router quote failed, falling back to Rust simulation: {}", e);
+            }
+        }
+    }
+
+    // Fallback: Rust simulation (walk both orderbooks)
+    let session_arc = if let Some(ref sid) = req.session_id {
+        state.session_manager.get_session(sid).await
+    } else {
+        None
+    };
+
+    // Helper to get orderbooks for quoting
+    let (leg1_quote, leg2_quote, first_mid, second_mid) = if let Some(ref session_arc) = session_arc {
+        let session = session_arc.read().await;
+        let first_ob = session.orderbooks.get(&first_pool).ok_or_else(|| {
+            ApiError::BadRequest(format!("Pool {} not built", first_pool.display_name()))
+        })?;
+        let leg1 = calculate_quote(first_ob, amount, true);
+        let first_mid = first_ob.mid_price().unwrap_or(0.0);
+
+        let second_ob = session.orderbooks.get(&second_pool).ok_or_else(|| {
+            ApiError::BadRequest(format!("Pool {} not built", second_pool.display_name()))
+        })?;
+        let leg2 = calculate_quote(second_ob, leg1.output_amount, false);
+        let second_mid = second_ob.mid_price().unwrap_or(0.0);
+
+        (leg1, leg2, first_mid, second_mid)
+    } else {
+        let orderbooks = state.orderbooks.read().await;
+        let first_ob = orderbooks.get(&first_pool).ok_or_else(|| {
+            ApiError::BadRequest(format!("Pool {} not built", first_pool.display_name()))
+        })?;
+        let leg1 = calculate_quote(first_ob, amount, true);
+        let first_mid = first_ob.mid_price().unwrap_or(0.0);
+
+        let second_ob = orderbooks.get(&second_pool).ok_or_else(|| {
+            ApiError::BadRequest(format!("Pool {} not built", second_pool.display_name()))
+        })?;
+        let leg2 = calculate_quote(second_ob, leg1.output_amount, false);
+        let second_mid = second_ob.mid_price().unwrap_or(0.0);
+
+        (leg1, leg2, first_mid, second_mid)
+    };
+
+    let from_decimals = get_decimals(from);
+    let to_decimals = get_decimals(to);
+    let input_human = format_human(amount, from_decimals);
+    let output_human = format_human(leg2_quote.output_amount, to_decimals);
+    let usdc_human = leg1_quote.output_amount as f64 / 1_000_000.0;
+
+    let effective_price = if input_human > 0.0 {
+        output_human / input_human
+    } else {
+        0.0
+    };
+
+    let mid_price = if first_mid > 0.0 && second_mid > 0.0 {
+        first_mid / second_mid
+    } else {
+        0.0
+    };
+
+    let price_impact_bps = if mid_price > 0.0 {
+        ((effective_price - mid_price).abs() / mid_price * 10_000.0) as u32
+    } else {
+        0
+    };
+
+    Ok(Json(QuoteResponse {
+        success: true,
+        error: None,
+        pool: format!("{} + {}", first_pool.display_name(), second_pool.display_name()),
+        input_token: from.to_string(),
+        output_token: to.to_string(),
+        input_amount: amount.to_string(),
+        input_amount_human: input_human,
+        estimated_output: leg2_quote.output_amount.to_string(),
+        estimated_output_human: output_human,
+        effective_price,
+        mid_price,
+        price_impact_bps,
+        levels_consumed: leg1_quote.levels_consumed + leg2_quote.levels_consumed,
+        orders_matched: leg1_quote.orders_matched + leg2_quote.orders_matched,
+        fully_fillable: leg1_quote.fully_filled && leg2_quote.fully_filled,
+        route: format!(
+            "{} -> DeepBook {} -> USDC -> DeepBook {} -> {}",
+            from, first_pool.display_name(), second_pool.display_name(), to
+        ),
+        route_type: "two_hop".to_string(),
+        intermediate_amount: Some(usdc_human),
     }))
 }

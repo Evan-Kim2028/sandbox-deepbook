@@ -21,3 +21,13 @@ node_modules/
 
 # Claude
 .claude/
+
+# Cloned reference repos
+deepbookv3/
+sui-sandbox/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Move build artifacts
+contracts/*/build/

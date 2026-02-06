@@ -13,6 +13,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use deepbook_sandbox_backend::api;
 use deepbook_sandbox_backend::sandbox::orderbook_builder::{OrderbookBuilder, SandboxOrderbook};
+use deepbook_sandbox_backend::sandbox::router;
 use deepbook_sandbox_backend::sandbox::state_loader::{DeepBookConfig, PoolId, PoolRegistry, StateLoader};
 use deepbook_sandbox_backend::sandbox::swap_executor::SessionManager;
 
@@ -155,12 +156,38 @@ async fn main() {
     };
     tracing::info!("SessionManager initialized with {} pool orderbooks", orderbooks.read().await.len());
 
+    // Spawn router thread for cross-pool MoveVM quotes
+    let router_handle = {
+        let pool_files_for_router: Vec<(PoolId, String)> = pool_files
+            .iter()
+            .map(|(id, path)| (*id, path.to_string()))
+            .collect();
+
+        tracing::info!("Spawning router thread for cross-pool quotes...");
+        let (handle, ready_rx) = router::spawn_router_thread(pool_files_for_router);
+
+        match ready_rx.await {
+            Ok(Ok(())) => {
+                tracing::info!("Router thread ready - cross-pool quotes enabled");
+                Some(handle)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("Router thread setup failed: {} - cross-pool quotes disabled", e);
+                None
+            }
+            Err(_) => {
+                tracing::warn!("Router thread dropped ready channel - cross-pool quotes disabled");
+                None
+            }
+        }
+    };
+
     // Build router
     let app = Router::new()
         .route("/health", get(health_check))
         .nest(
             "/api",
-            api::router(pool_registry, session_manager, orderbooks),
+            api::router(pool_registry, session_manager, orderbooks, router_handle),
         )
         .layer(
             CorsLayer::new()
@@ -181,7 +208,7 @@ async fn main() {
     tracing::info!("  GET  /api/balance/:session_id - Get token balances");
     tracing::info!("  POST /api/faucet              - Mint tokens into session");
     tracing::info!("  POST /api/swap                - Execute swap (requires session_id)");
-    tracing::info!("  POST /api/swap/quote          - Get swap quote (no session needed)");
+    tracing::info!("  POST /api/swap/quote          - Get swap quote (supports cross-pool routes)");
     tracing::info!("  GET  /api/pools               - List available pools");
     tracing::info!("  GET  /api/orderbook           - Get orderbook snapshot");
     tracing::info!("  GET  /api/orderbook/depth     - Get Binance-style depth");
