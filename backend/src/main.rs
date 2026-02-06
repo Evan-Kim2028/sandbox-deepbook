@@ -14,7 +14,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use deepbook_sandbox_backend::api;
 use deepbook_sandbox_backend::sandbox::orderbook_builder::{OrderbookBuilder, SandboxOrderbook};
 use deepbook_sandbox_backend::sandbox::router;
-use deepbook_sandbox_backend::sandbox::state_loader::{DeepBookConfig, PoolId, PoolRegistry, StateLoader};
+use deepbook_sandbox_backend::sandbox::state_loader::{
+    DeepBookConfig, PoolId, PoolRegistry, StateLoader,
+};
 use deepbook_sandbox_backend::sandbox::swap_executor::SessionManager;
 
 #[tokio::main]
@@ -43,40 +45,42 @@ async fn main() {
         (PoolId::DeepUsdc, "./data/deep_usdc_state_cp240M.jsonl"),
     ];
 
-    // Load all pool states
+    // Load all pool states (required for startup)
     {
         let mut registry = pool_registry.write().await;
         for (pool_id, file_path) in &pool_files {
             let path = std::path::Path::new(file_path);
-            if path.exists() {
-                match registry.load_pool_from_file(*pool_id, path) {
-                    Ok(count) => {
-                        tracing::info!(
-                            "Loaded {} pool: {} objects from {}",
-                            pool_id.display_name(),
-                            count,
-                            path.display()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to load {} pool from {}: {}",
-                            pool_id.display_name(),
-                            path.display(),
-                            e
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(
+            if !path.exists() {
+                tracing::error!(
                     "{} state file not found: {}",
                     pool_id.display_name(),
                     path.display()
                 );
+                std::process::exit(1);
+            }
+
+            match registry.load_pool_from_file(*pool_id, path) {
+                Ok(count) => {
+                    tracing::info!(
+                        "Loaded {} pool: {} objects from {}",
+                        pool_id.display_name(),
+                        count,
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load {} pool from {}: {}",
+                        pool_id.display_name(),
+                        path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
             }
         }
 
-        // Log summary
+        // Log summary and enforce complete pool coverage.
         let summary = registry.summary();
         tracing::info!(
             "Pool registry ready: {}/{} pools loaded",
@@ -92,6 +96,15 @@ async fn main() {
                 pool.bids_slices,
                 pool.checkpoint
             );
+        }
+
+        if summary.total_pools != pool_files.len() {
+            tracing::error!(
+                "Startup requires all {} pools to load; only {} were loaded",
+                pool_files.len(),
+                summary.total_pools
+            );
+            std::process::exit(1);
         }
     }
 
@@ -111,6 +124,7 @@ async fn main() {
                     PoolId::SuiUsdc => Some("./data/sui_usdc_state_cp240M.jsonl"),
                     PoolId::WalUsdc => Some("./data/wal_usdc_state_cp240M.jsonl"),
                     PoolId::DeepUsdc => Some("./data/deep_usdc_state_cp240M.jsonl"),
+                    PoolId::DebugUsdc => None,
                 };
                 file_path.map(|p| (*pool_id, p.to_string()))
             })
@@ -118,35 +132,41 @@ async fn main() {
         drop(registry);
 
         // Build orderbooks in a blocking task since OrderbookBuilder is not Send
-        let result = tokio::task::spawn_blocking(move || {
-            build_movevm_orderbooks(&pool_data)
-        })
-        .await
-        .expect("spawn_blocking panicked");
+        let result = tokio::task::spawn_blocking(move || build_movevm_orderbooks(&pool_data))
+            .await
+            .expect("spawn_blocking panicked");
 
-        match result {
-            Ok(map) => {
-                tracing::info!(
-                    "MoveVM orderbooks built: {} pools ready",
-                    map.len()
-                );
-                for (pool_id, ob) in &map {
-                    tracing::info!(
-                        "  {} - {} bids, {} asks, mid=${:.6}",
-                        pool_id.display_name(),
-                        ob.bids.len(),
-                        ob.asks.len(),
-                        ob.mid_price().unwrap_or(0.0)
-                    );
-                }
-                Arc::new(RwLock::new(map))
-            }
+        let map = match result {
+            Ok(map) => map,
             Err(e) => {
-                tracing::error!("Failed to build MoveVM orderbooks: {}", e);
-                tracing::warn!("Server will start but orderbook/swap endpoints won't work");
-                Arc::new(RwLock::new(HashMap::new()))
+                tracing::error!(
+                    "Failed to build MoveVM orderbooks: {}. Backend startup requires VM orderbooks.",
+                    e
+                );
+                std::process::exit(1);
             }
+        };
+
+        if map.len() != pool_files.len() {
+            tracing::error!(
+                "Expected {} MoveVM orderbooks, built {}. Backend startup requires complete VM state.",
+                pool_files.len(),
+                map.len()
+            );
+            std::process::exit(1);
         }
+
+        tracing::info!("MoveVM orderbooks built: {} pools ready", map.len());
+        for (pool_id, ob) in &map {
+            tracing::info!(
+                "  {} - {} bids, {} asks, mid=${:.6}",
+                pool_id.display_name(),
+                ob.bids.len(),
+                ob.asks.len(),
+                ob.mid_price().unwrap_or(0.0)
+            );
+        }
+        Arc::new(RwLock::new(map))
     };
 
     // Create session manager with a snapshot of global orderbooks
@@ -154,7 +174,10 @@ async fn main() {
         let ob_snapshot = orderbooks.read().await.clone();
         Arc::new(SessionManager::new(ob_snapshot))
     };
-    tracing::info!("SessionManager initialized with {} pool orderbooks", orderbooks.read().await.len());
+    tracing::info!(
+        "SessionManager initialized with {} pool orderbooks",
+        orderbooks.read().await.len()
+    );
 
     // Spawn router thread for cross-pool MoveVM quotes
     let router_handle = {
@@ -163,31 +186,64 @@ async fn main() {
             .map(|(id, path)| (*id, path.to_string()))
             .collect();
 
-        tracing::info!("Spawning router thread for cross-pool quotes...");
+        tracing::info!("Spawning router thread for MoveVM quote execution...");
         let (handle, ready_rx) = router::spawn_router_thread(pool_files_for_router);
 
         match ready_rx.await {
             Ok(Ok(())) => {
-                tracing::info!("Router thread ready - cross-pool quotes enabled");
-                Some(handle)
+                tracing::info!("Router thread ready - MoveVM quote engine fully enabled");
+                handle
             }
             Ok(Err(e)) => {
-                tracing::warn!("Router thread setup failed: {} - cross-pool quotes disabled", e);
-                None
+                tracing::error!(
+                    "Router thread setup failed: {}. Router deployment is required for backend startup.",
+                    e
+                );
+                std::process::exit(1);
             }
             Err(_) => {
-                tracing::warn!("Router thread dropped ready channel - cross-pool quotes disabled");
-                None
+                tracing::error!(
+                    "Router thread dropped ready channel. Router deployment is required for backend startup."
+                );
+                std::process::exit(1);
             }
         }
     };
+
+    let startup_report = match router_handle.startup_check().await {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::error!(
+                "Failed to retrieve router startup self-check report: {}",
+                e
+            );
+            std::process::exit(1);
+        }
+    };
+    if !startup_report.ok {
+        tracing::error!(
+            "Router startup self-check failed: {}",
+            startup_report.errors.join(" | ")
+        );
+        std::process::exit(1);
+    }
+    tracing::info!(
+        "Router startup self-check OK (shared_objects={}, reserve_coins={})",
+        startup_report.shared_objects.len(),
+        startup_report.reserve_coins.len()
+    );
 
     // Build router
     let app = Router::new()
         .route("/health", get(health_check))
         .nest(
             "/api",
-            api::router(pool_registry, session_manager, orderbooks, router_handle),
+            api::router(
+                pool_registry,
+                session_manager,
+                orderbooks,
+                Some(router_handle),
+            ),
         )
         .layer(
             CorsLayer::new()
@@ -201,14 +257,17 @@ async fn main() {
     tracing::info!("Starting server on {}", addr);
     tracing::info!("API endpoints:");
     tracing::info!("  GET  /health                  - Health check");
+    tracing::info!("  GET  /api/startup-check       - Router startup self-check report");
     tracing::info!("  POST /api/session             - Create new trading session");
     tracing::info!("  GET  /api/session/:id         - Get session info & balances");
     tracing::info!("  GET  /api/session/:id/history - Get swap history");
     tracing::info!("  POST /api/session/:id/reset   - Reset session to initial state");
     tracing::info!("  GET  /api/balance/:session_id - Get token balances");
-    tracing::info!("  POST /api/faucet              - Mint tokens into session");
+    tracing::info!("  POST /api/faucet              - Fund session via local MoveVM faucet PTB");
     tracing::info!("  POST /api/swap                - Execute swap (requires session_id)");
     tracing::info!("  POST /api/swap/quote          - Get swap quote (supports cross-pool routes)");
+    tracing::info!("  POST /api/debug/pool          - Create+seed DBG/USDC debug pool in local VM");
+    tracing::info!("  GET  /api/debug/pools         - List created debug pools");
     tracing::info!("  GET  /api/pools               - List available pools");
     tracing::info!("  GET  /api/orderbook           - Get orderbook snapshot");
     tracing::info!("  GET  /api/orderbook/depth     - Get Binance-style depth");
@@ -246,7 +305,10 @@ fn build_movevm_orderbooks(
             continue;
         }
 
-        tracing::info!("Building {} orderbook via MoveVM...", pool_id.display_name());
+        tracing::info!(
+            "Building {} orderbook via MoveVM...",
+            pool_id.display_name()
+        );
 
         // Each pool gets its own builder + runtime (OrderbookBuilder is not Send)
         let rt = tokio::runtime::Runtime::new()?;

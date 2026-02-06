@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::api::AppState;
 use crate::sandbox::swap_executor::{SwapResult, UserBalances};
@@ -29,6 +30,8 @@ pub struct BalanceInfo {
     pub deep_human: f64,
     pub wal: String,
     pub wal_human: f64,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub custom: HashMap<String, String>,
 }
 
 impl From<&UserBalances> for BalanceInfo {
@@ -42,6 +45,11 @@ impl From<&UserBalances> for BalanceInfo {
             deep_human: b.deep as f64 / 1_000_000.0,
             wal: b.wal.to_string(),
             wal_human: b.wal as f64 / 1_000_000_000.0,
+            custom: b
+                .custom
+                .iter()
+                .map(|(symbol, amount)| (symbol.clone(), amount.to_string()))
+                .collect(),
         }
     }
 }

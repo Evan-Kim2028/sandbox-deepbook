@@ -33,6 +33,7 @@ pub enum PoolId {
     SuiUsdc,
     WalUsdc,
     DeepUsdc,
+    DebugUsdc,
 }
 
 impl PoolId {
@@ -41,6 +42,7 @@ impl PoolId {
             PoolId::SuiUsdc => "sui_usdc",
             PoolId::WalUsdc => "wal_usdc",
             PoolId::DeepUsdc => "deep_usdc",
+            PoolId::DebugUsdc => "debug_usdc",
         }
     }
 
@@ -49,6 +51,7 @@ impl PoolId {
             PoolId::SuiUsdc => "SUI/USDC",
             PoolId::WalUsdc => "WAL/USDC",
             PoolId::DeepUsdc => "DEEP/USDC",
+            PoolId::DebugUsdc => "DBG/USDC",
         }
     }
 
@@ -57,6 +60,9 @@ impl PoolId {
             "sui_usdc" | "sui-usdc" | "suiusdc" => Some(PoolId::SuiUsdc),
             "wal_usdc" | "wal-usdc" | "walusdc" => Some(PoolId::WalUsdc),
             "deep_usdc" | "deep-usdc" | "deepusdc" => Some(PoolId::DeepUsdc),
+            "debug_usdc" | "debug-usdc" | "debugusdc" | "dbg_usdc" | "dbg-usdc" | "dbgusdc" => {
+                Some(PoolId::DebugUsdc)
+            }
             _ => None,
         }
     }
@@ -159,6 +165,7 @@ impl DeepBookConfig {
             PoolId::SuiUsdc => Self::sui_usdc(),
             PoolId::WalUsdc => Self::wal_usdc(),
             PoolId::DeepUsdc => Self::deep_usdc(),
+            PoolId::DebugUsdc => Self::sui_usdc(),
         }
     }
 }

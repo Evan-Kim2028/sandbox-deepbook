@@ -121,7 +121,10 @@ pub async fn get_orderbook(
             None => {
                 return Json(OrderbookResponse {
                     success: false,
-                    error: Some(format!("Pool '{}' orderbook not built", pool_id.display_name())),
+                    error: Some(format!(
+                        "Pool '{}' orderbook not built",
+                        pool_id.display_name()
+                    )),
                     orderbook: None,
                     stats: None,
                 });
@@ -135,7 +138,10 @@ pub async fn get_orderbook(
             None => {
                 return Json(OrderbookResponse {
                     success: false,
-                    error: Some(format!("Pool '{}' orderbook not built", pool_id.display_name())),
+                    error: Some(format!(
+                        "Pool '{}' orderbook not built",
+                        pool_id.display_name()
+                    )),
                     orderbook: None,
                     stats: None,
                 });
@@ -225,7 +231,10 @@ pub async fn get_depth(
         None => {
             return Json(BinanceDepthResponse {
                 success: false,
-                error: Some(format!("Pool '{}' orderbook not built", pool_id.display_name())),
+                error: Some(format!(
+                    "Pool '{}' orderbook not built",
+                    pool_id.display_name()
+                )),
                 data: None,
             });
         }
@@ -344,6 +353,7 @@ fn sandbox_orderbook_to_snapshot(ob: &SandboxOrderbook) -> OrderbookSnapshot {
         PoolId::SuiUsdc => "SUI",
         PoolId::DeepUsdc => "DEEP",
         PoolId::WalUsdc => "WAL",
+        PoolId::DebugUsdc => "DBG",
     };
 
     OrderbookSnapshot {
@@ -372,6 +382,7 @@ fn sandbox_orderbook_to_binance(ob: &SandboxOrderbook) -> BinanceOrderbookExtend
         PoolId::SuiUsdc => "SUI",
         PoolId::DeepUsdc => "DEEP",
         PoolId::WalUsdc => "WAL",
+        PoolId::DebugUsdc => "DBG",
     };
     let symbol = format!("{}USDC", base_symbol);
 

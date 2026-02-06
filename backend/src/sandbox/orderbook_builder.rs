@@ -34,6 +34,8 @@ const WAL_TYPE: &str =
     "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL";
 const DEEP_TYPE: &str =
     "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP";
+const DEBUG_TYPE: &str =
+    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa::debug_token::DEBUG_TOKEN";
 
 /// Order from DeepBook (decoded by Move VM)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,59 +115,6 @@ impl SandboxOrderbook {
         self.asks
             .first()
             .map(|l| l.price as f64 / self.price_divisor())
-    }
-
-    /// Consume liquidity from the orderbook after a swap.
-    /// Walks price levels the same way calculate_quote does, subtracting consumed
-    /// base quantity from each level and removing empty levels.
-    ///
-    /// `input_amount` is in smallest units of the input token.
-    /// `is_sell=true`: selling base (walk bids), `is_sell=false`: buying base with quote (walk asks).
-    pub fn consume_liquidity(&mut self, input_amount: u64, is_sell: bool) {
-        let base_scale = 10f64.powi(self.base_decimals as i32);
-        let quote_scale = 1_000_000.0f64; // USDC always 6 decimals
-        let price_divisor = self.price_divisor_value();
-
-        let levels = if is_sell { &mut self.bids } else { &mut self.asks };
-        let mut remaining_input = input_amount as f64;
-
-        for level in levels.iter_mut() {
-            if remaining_input <= 0.0 {
-                break;
-            }
-
-            let price_usd = level.price as f64 / price_divisor;
-            let level_qty = level.total_quantity as f64 / base_scale;
-
-            if is_sell {
-                // Selling base tokens for quote: remaining_input is base smallest units
-                let input_base = remaining_input / base_scale;
-                let take_qty = level_qty.min(input_base);
-                if take_qty > 0.0 {
-                    let consumed_raw = (take_qty * base_scale) as u64;
-                    level.total_quantity = level.total_quantity.saturating_sub(consumed_raw);
-                    remaining_input -= take_qty * base_scale;
-                }
-            } else {
-                // Buying base tokens with quote: remaining_input is quote smallest units
-                let input_quote = remaining_input / quote_scale;
-                let cost_for_level = level_qty * price_usd;
-                if cost_for_level <= input_quote {
-                    // Take entire level
-                    remaining_input -= cost_for_level * quote_scale;
-                    level.total_quantity = 0;
-                } else {
-                    // Partial fill
-                    let take_qty = input_quote / price_usd;
-                    let consumed_raw = (take_qty * base_scale) as u64;
-                    level.total_quantity = level.total_quantity.saturating_sub(consumed_raw);
-                    remaining_input = 0.0;
-                }
-            }
-        }
-
-        // Remove levels with zero quantity
-        levels.retain(|l| l.total_quantity > 0);
     }
 
     pub fn spread_bps(&self) -> Option<u64> {
@@ -320,26 +269,24 @@ impl OrderbookBuilder {
             // Cache the pool wrapper for later use
             if obj.object_id == *pool_wrapper_id {
                 // Convert object_json to BCS bytes using the converter
-                let bcs_bytes = match self
+                let bcs_bytes = self
                     .bcs_converter
                     .convert(&obj.object_type, &obj.object_json)
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::warn!(
-                            "BCS conversion failed for pool {}, using JSON fallback: {}",
+                    .map_err(|e| {
+                        anyhow!(
+                            "BCS conversion failed for pool wrapper {} (type: {}): {}",
                             obj.object_id,
+                            obj.object_type,
                             e
-                        );
-                        serde_json::to_vec(&obj.object_json)?
-                    }
-                };
+                        )
+                    })?;
 
                 // Build the Pool type tag
                 let (base_type, quote_type) = match pool_id {
                     PoolId::SuiUsdc => (SUI_TYPE, USDC_TYPE),
                     PoolId::WalUsdc => (WAL_TYPE, USDC_TYPE),
                     PoolId::DeepUsdc => (DEEP_TYPE, USDC_TYPE),
+                    PoolId::DebugUsdc => (DEBUG_TYPE, USDC_TYPE),
                 };
 
                 let pool_type = build_pool_type_tag(base_type, quote_type)?;
@@ -452,10 +399,7 @@ impl OrderbookBuilder {
         //   - Inner nodes: Field<u64, Slice<u64>> (vals contains child slice IDs)
         let corrected_type = self.correct_bigvector_slice_type(&obj.object_type, &obj.object_json);
         if corrected_type != obj.object_type {
-            eprintln!(
-                "DEBUG type correction: {} -> {}",
-                obj.object_type, corrected_type
-            );
+            tracing::debug!("Type correction: {} -> {}", obj.object_type, corrected_type);
         }
 
         // Parse the FULL Field<K, V> type - this is what borrow_child_object expects
@@ -464,36 +408,24 @@ impl OrderbookBuilder {
 
         // Convert the FULL Field object to BCS bytes (id + name + value)
         // For BigVector slices, use the corrected type for BCS conversion
-        let bcs_bytes = match self
+        let bcs_bytes = self
             .bcs_converter
             .convert(&corrected_type, &obj.object_json)
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                // Print error for Slice types - this is critical
-                if corrected_type.contains("Slice") {
-                    eprintln!(
-                        "ERROR: BCS conversion failed for Slice {}: {}",
-                        obj.object_id, e
-                    );
-                }
-                tracing::debug!(
-                    "BCS conversion for dynamic field {} (type: {}): {}",
+            .map_err(|e| {
+                anyhow!(
+                    "BCS conversion failed for dynamic field {} (type: {}): {}",
                     obj.object_id,
                     corrected_type,
                     e
-                );
-                // Use JSON serialization as fallback - THIS WILL FAIL AT RUNTIME
-                serde_json::to_vec(&obj.object_json)?
-            }
-        };
+                )
+            })?;
 
         // Register the dynamic field with the simulation environment
         // Use the FULL Field<K, V> type, which is what borrow_child_object<Field<K,V>> expects
-        // Debug: print first 100 bytes of BCS
         if corrected_type.contains("Slice") {
-            eprintln!(
-                "DEBUG BCS for Slice: first 100 bytes = {:02x?}",
+            tracing::debug!(
+                "BCS for Slice {} (first 100 bytes): {:02x?}",
+                obj.object_id,
                 &bcs_bytes[..std::cmp::min(100, bcs_bytes.len())]
             );
         }
@@ -504,7 +436,7 @@ impl OrderbookBuilder {
             bcs_bytes.clone(),
         );
 
-        tracing::info!(
+        tracing::debug!(
             "Registered dynamic field: parent={}, child={}, type={}, bcs_len={}",
             parent_addr,
             obj.object_id,
@@ -602,7 +534,7 @@ impl OrderbookBuilder {
             let corrected = format!("{}{}{}", prefix, slice_type, suffix);
 
             if is_inner_node {
-                eprintln!("DEBUG: Inner node slice detected, using Slice<u64>");
+                tracing::debug!("Inner node slice detected, using Slice<u64>");
             }
 
             tracing::debug!(
@@ -620,23 +552,17 @@ impl OrderbookBuilder {
     /// Load a single object into the simulation environment
     fn load_object(&mut self, obj: &ExportedObject) -> Result<()> {
         // Convert object_json to BCS bytes using bytecode layouts
-        let bcs_bytes = match self
+        let bcs_bytes = self
             .bcs_converter
             .convert(&obj.object_type, &obj.object_json)
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                // Fallback to JSON serialization if conversion fails
-                // This can happen for types not in the loaded bytecode
-                tracing::warn!(
-                    "BCS conversion failed for {} (type: {}), using JSON fallback: {}",
+            .map_err(|e| {
+                anyhow!(
+                    "BCS conversion failed for object {} (type: {}): {}",
                     obj.object_id,
                     obj.object_type,
                     e
-                );
-                serde_json::to_vec(&obj.object_json)?
-            }
-        };
+                )
+            })?;
 
         let is_shared = obj.owner_type.as_deref() == Some("Shared");
 
@@ -667,6 +593,7 @@ impl OrderbookBuilder {
             PoolId::SuiUsdc => (SUI_TYPE, USDC_TYPE, 9u8, 6u8),
             PoolId::WalUsdc => (WAL_TYPE, USDC_TYPE, 9u8, 6u8),
             PoolId::DeepUsdc => (DEEP_TYPE, USDC_TYPE, 6u8, 6u8),
+            PoolId::DebugUsdc => (DEBUG_TYPE, USDC_TYPE, 9u8, 6u8),
         };
 
         // Get bids

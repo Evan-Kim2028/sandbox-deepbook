@@ -54,10 +54,10 @@ impl JsonToBcsConverter {
             .get_layout_with_type_args(type_str)
             .ok_or_else(|| anyhow!("Could not find layout for type: {}", type_str))?;
 
-        // Debug: print layout field order
+        // Debug-only: print layout field order for slice conversions.
         if type_str.contains("Slice") {
-            eprintln!(
-                "DEBUG convert: type={}, layout.fields={:?}",
+            tracing::debug!(
+                "convert: type={}, layout.fields={:?}",
                 type_str,
                 layout.fields.iter().map(|f| &f.name).collect::<Vec<_>>()
             );
