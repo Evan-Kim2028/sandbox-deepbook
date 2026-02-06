@@ -97,7 +97,7 @@ export function useFaucet() {
         sui: '10000000000',   // 10 SUI
         usdc: '100000000',    // 100 USDC
         wal: '50000000000',   // 50 WAL
-        deep: '100000000000', // 100 DEEP
+        deep: '100000000', // 100 DEEP
       };
 
       return api.requestTokens({

@@ -64,6 +64,17 @@ export function SwapCard({ sessionId }: SwapCardProps) {
         execution_time_ms: data.execution_time_ms,
         gas_used: data.gas_used,
         ptb_execution: data.ptb_execution,
+        swapMeta: {
+          input_token: data.input_token,
+          output_token: data.output_token,
+          input_amount_human: data.input_amount_human,
+          output_amount_human: data.output_amount_human,
+          effective_price: data.effective_price,
+          price_impact_bps: data.price_impact_bps,
+          route_type: data.route_type ?? 'direct',
+          intermediate_amount: data.intermediate_amount,
+          route: quote?.route ?? '',
+        },
       });
 
       toast.success(
@@ -233,8 +244,24 @@ export function SwapCard({ sessionId }: SwapCardProps) {
           </div>
           <div className="flex justify-between text-gray-400 mt-1">
             <span>Route</span>
-            <span>{quote.route}</span>
+            {quote.route_type === 'two_hop' ? (
+              <span className="flex items-center gap-1">
+                <span className="text-white font-medium">{quote.input_token.toUpperCase()}</span>
+                <span className="text-gray-500">&rarr;</span>
+                <span className="text-green-400 font-medium">USDC</span>
+                <span className="text-gray-500">&rarr;</span>
+                <span className="text-white font-medium">{quote.output_token.toUpperCase()}</span>
+              </span>
+            ) : (
+              <span>{quote.route}</span>
+            )}
           </div>
+          {quote.route_type === 'two_hop' && quote.intermediate_amount != null && (
+            <div className="flex justify-between text-gray-400 mt-1">
+              <span>Intermediate</span>
+              <span className="text-green-400">{quote.intermediate_amount.toFixed(2)} USDC</span>
+            </div>
+          )}
           {!quote.fully_fillable && (
             <div className="mt-2 text-xs text-yellow-400">
               Partial fill — not enough liquidity for full amount

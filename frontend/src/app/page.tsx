@@ -17,10 +17,10 @@ export default function Home() {
         {/* Sandbox Banner */}
         <div className="mb-6 p-3 bg-deep-blue/10 border border-deep-blue/30 rounded-lg text-center">
           <span className="text-deep-blue font-medium">
-            🧪 Sandbox Mode
+            Sandbox Mode
           </span>
           <span className="text-gray-400 ml-2">
-            Forked from mainnet • No real funds • Instant execution
+            Forked from mainnet &bull; Move VM execution &bull; Smart order routing
           </span>
         </div>
 

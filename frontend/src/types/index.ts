@@ -41,6 +41,8 @@ export interface SwapResponse {
   execution_time_ms?: number;
   ptb_execution?: PtbExecution;
   balances_after?: Balances;
+  route_type?: 'direct' | 'two_hop';
+  intermediate_amount?: number;
 }
 
 export interface PtbExecution {
@@ -62,7 +64,7 @@ export interface PtbCommand {
 }
 
 export interface PtbEvent {
-  type: string;
+  event_type: string;
   data: Record<string, unknown>;
 }
 
@@ -130,6 +132,8 @@ export interface QuoteResponse {
   orders_matched: number;
   fully_fillable: boolean;
   route: string;
+  route_type?: 'direct' | 'two_hop';
+  intermediate_amount?: number;
 }
 
 export interface PoolInfo {
@@ -142,6 +146,18 @@ export interface PoolInfo {
   ask_levels?: number;
 }
 
+export interface SwapMeta {
+  input_token: string;
+  output_token: string;
+  input_amount_human: number;
+  output_amount_human: number;
+  effective_price: number;
+  price_impact_bps: number;
+  route_type: 'direct' | 'two_hop';
+  intermediate_amount?: number;
+  route: string;
+}
+
 export interface Activity {
   id: string;
   type: 'swap' | 'faucet';
@@ -150,4 +166,5 @@ export interface Activity {
   execution_time_ms?: number;
   gas_used?: string;
   ptb_execution?: PtbExecution;
+  swapMeta?: SwapMeta;
 }
