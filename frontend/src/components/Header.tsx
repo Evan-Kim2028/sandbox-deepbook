@@ -1,11 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { useBalances, useSession } from '@/hooks/useSession';
+import { useBalances, useDebugPoolStatus, useSession, useStartupCheck } from '@/hooks/useSession';
 import { FaucetModal } from './FaucetModal';
 
 export function Header() {
   const { balances } = useBalances();
+  const { debugPool } = useDebugPoolStatus();
+  const { startupCheck } = useStartupCheck();
   const { session } = useSession();
   const [showFaucet, setShowFaucet] = useState(false);
 
@@ -13,6 +15,11 @@ export function Header() {
     val != null
       ? val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
       : '--';
+
+  const debugSymbol = debugPool?.token_symbol ?? 'DBG';
+  const debugDecimals = debugPool?.token_decimals ?? 9;
+  const debugRaw = balances?.custom?.[debugSymbol];
+  const debugHuman = debugRaw != null ? Number(debugRaw) / Math.pow(10, debugDecimals) : undefined;
 
   return (
     <>
@@ -30,6 +37,11 @@ export function Header() {
                   ? `Checkpoint ${(session.checkpoint / 1_000_000).toFixed(1)}M`
                   : 'Sandbox'}
               </p>
+              {session?.session_id && (
+                <p className="text-[10px] text-gray-600">
+                  Session {session.session_id.slice(0, 8)}
+                </p>
+              )}
             </div>
           </div>
 
@@ -63,6 +75,13 @@ export function Header() {
                   {fmt(balances?.wal_human)}
                 </p>
               </div>
+              <div className="w-px h-8 bg-deep-border" />
+              <div className="text-right">
+                <p className="text-xs text-gray-500">{debugSymbol}</p>
+                <p className="font-mono font-medium text-sm">
+                  {fmt(debugHuman)}
+                </p>
+              </div>
             </div>
 
             {/* Faucet Button */}
@@ -75,6 +94,9 @@ export function Header() {
               </svg>
               Get Tokens
             </button>
+            <div className={`text-xs px-2 py-1 rounded border ${startupCheck?.ok ? 'text-green-400 border-green-500/30 bg-green-500/10' : 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10'}`}>
+              VM {startupCheck?.ok ? 'Ready' : 'Check'}
+            </div>
           </div>
         </div>
       </header>

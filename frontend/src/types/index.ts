@@ -15,6 +15,7 @@ export interface Balances {
   deep_human: number;
   wal: string;
   wal_human: number;
+  custom?: Record<string, string>;
 }
 
 export interface SwapRequest {
@@ -70,7 +71,7 @@ export interface PtbEvent {
 
 export interface FaucetRequest {
   session_id: string;
-  token: 'sui' | 'usdc' | 'wal' | 'deep';
+  token: string;
   amount: string;
 }
 
@@ -144,6 +145,85 @@ export interface PoolInfo {
   mid_price?: number;
   bid_levels?: number;
   ask_levels?: number;
+}
+
+export interface DebugPoolConfig {
+  tick_size: number;
+  lot_size: number;
+  min_size: number;
+  whitelisted_pool: boolean;
+  pay_with_deep: boolean;
+  bid_price: number;
+  ask_price: number;
+  bid_quantity: number;
+  ask_quantity: number;
+  base_liquidity: number;
+  quote_liquidity: number;
+  deep_fee_budget: number;
+}
+
+export interface DebugPoolStatus {
+  success: boolean;
+  created: boolean;
+  pool_object_id?: string;
+  token_symbol: string;
+  token_name: string;
+  token_description: string;
+  token_icon_url: string;
+  token_decimals: number;
+  token_type: string;
+  config: DebugPoolConfig;
+  message?: string;
+}
+
+export interface DebugPoolListResponse {
+  success: boolean;
+  pools: DebugPoolStatus[];
+}
+
+export interface EnsureDebugPoolRequest {
+  token_symbol?: string;
+  token_name?: string;
+  token_description?: string;
+  token_icon_url?: string;
+  tick_size?: number;
+  lot_size?: number;
+  min_size?: number;
+  whitelisted_pool?: boolean;
+  pay_with_deep?: boolean;
+  bid_price?: number;
+  ask_price?: number;
+  bid_quantity?: number;
+  ask_quantity?: number;
+  base_liquidity?: number;
+  quote_liquidity?: number;
+  deep_fee_budget?: number;
+}
+
+export interface RouterSharedObjectCheck {
+  name: string;
+  object_id: string;
+  present: boolean;
+  is_shared: boolean;
+  version?: number;
+}
+
+export interface RouterReserveCoinCheck {
+  coin_type: string;
+  object_id?: string;
+  present: boolean;
+  version?: number;
+  value?: number;
+}
+
+export interface StartupCheckReport {
+  ok: boolean;
+  checked_at_unix_ms: number;
+  router_package_deployed: boolean;
+  router_health_check_passed: boolean;
+  shared_objects: RouterSharedObjectCheck[];
+  reserve_coins: RouterReserveCoinCheck[];
+  errors: string[];
 }
 
 export interface SwapMeta {

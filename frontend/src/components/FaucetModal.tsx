@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { useFaucet } from '@/hooks/useSession';
+import { useDebugPoolStatus, useFaucet } from '@/hooks/useSession';
 import { useActivityStore } from '@/hooks/useActivityStore';
 
 interface FaucetModalProps {
@@ -10,27 +10,48 @@ interface FaucetModalProps {
   onClose: () => void;
 }
 
-const TOKENS = [
-  { id: 'sui', name: 'SUI', amount: '10', icon: '◎', color: 'text-blue-400' },
-  { id: 'usdc', name: 'USDC', amount: '100', icon: '$', color: 'text-green-400' },
-  { id: 'deep', name: 'DEEP', amount: '100', icon: 'D', color: 'text-cyan-400' },
-  { id: 'wal', name: 'WAL', amount: '50', icon: 'W', color: 'text-purple-400' },
-] as const;
-
-type FaucetToken = typeof TOKENS[number]['id'];
+type FaucetToken = {
+  id: string;
+  name: string;
+  amount: string;
+  decimals: number;
+  icon: string;
+  color: string;
+};
 
 export function FaucetModal({ isOpen, onClose }: FaucetModalProps) {
-  const [selectedToken, setSelectedToken] = useState<FaucetToken>('sui');
+  const { debugPool } = useDebugPoolStatus();
+  const debugDecimals = debugPool?.token_decimals ?? 9;
+  const tokens: FaucetToken[] = [
+    { id: 'sui', name: 'SUI', amount: '10', decimals: 9, icon: '◎', color: 'text-blue-400' },
+    { id: 'usdc', name: 'USDC', amount: '100', decimals: 6, icon: '$', color: 'text-green-400' },
+    { id: 'deep', name: 'DEEP', amount: '100', decimals: 6, icon: 'D', color: 'text-cyan-400' },
+    { id: 'wal', name: 'WAL', amount: '50', decimals: 9, icon: 'W', color: 'text-purple-400' },
+    {
+      id: (debugPool?.token_symbol ?? 'DBG').toLowerCase(),
+      name: debugPool?.token_symbol ?? 'DBG',
+      amount: '100',
+      decimals: debugDecimals,
+      icon: '◇',
+      color: 'text-amber-400',
+    },
+  ];
+  const [selectedToken, setSelectedToken] = useState<string>(tokens[0].id);
   const faucet = useFaucet();
   const addActivity = useActivityStore((s) => s.addActivity);
 
   if (!isOpen) return null;
 
   const handleRequest = async () => {
-    const token = TOKENS.find((t) => t.id === selectedToken)!;
+    const token = tokens.find((t) => t.id === selectedToken);
+    if (!token) return;
+    const amountRaw = Math.round(parseFloat(token.amount) * Math.pow(10, token.decimals)).toString();
 
     try {
-      const result = await faucet.mutateAsync(selectedToken);
+      const result = await faucet.mutateAsync({
+        token: token.name.toLowerCase(),
+        amount: amountRaw,
+      });
 
       addActivity({
         type: 'faucet',
@@ -82,12 +103,12 @@ export function FaucetModal({ isOpen, onClose }: FaucetModalProps) {
         </div>
 
         <p className="text-gray-400 text-sm mb-6">
-          Select a token to receive. These are simulated tokens for testing in the sandbox environment.
+          Select a token to receive. Faucet coin objects are created via local MoveVM PTB execution.
         </p>
 
         {/* Token Selection */}
         <div className="space-y-3 mb-6">
-          {TOKENS.map((token) => (
+          {tokens.map((token) => (
             <button
               key={token.id}
               onClick={() => setSelectedToken(token.id)}

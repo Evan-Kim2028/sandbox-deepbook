@@ -1,6 +1,7 @@
 'use client';
 
 import { Header } from '@/components/Header';
+import { DebugPoolPanel } from '@/components/DebugPoolPanel';
 import { SwapCard } from '@/components/SwapCard';
 import { OrderBook } from '@/components/OrderBook';
 import { ActivityFeed } from '@/components/ActivityFeed';
@@ -23,6 +24,8 @@ export default function Home() {
             Forked from mainnet &bull; Move VM execution &bull; Smart order routing
           </span>
         </div>
+
+        <DebugPoolPanel />
 
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

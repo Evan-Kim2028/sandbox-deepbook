@@ -1,38 +1,72 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { useBalances, useQuote } from '@/hooks/useSession';
+import { useBalances, useDebugPoolStatus, useQuote } from '@/hooks/useSession';
 import { useActivityStore } from '@/hooks/useActivityStore';
 
 interface SwapCardProps {
   sessionId?: string;
 }
 
-type TokenKey = 'SUI' | 'USDC' | 'DEEP' | 'WAL';
+type TokenMeta = { symbol: string; decimals: number; icon: string };
 
-const TOKENS: Record<TokenKey, { symbol: string; decimals: number; icon: string }> = {
+const TOKENS: Record<string, TokenMeta> = {
   SUI: { symbol: 'SUI', decimals: 9, icon: '◎' },
   USDC: { symbol: 'USDC', decimals: 6, icon: '$' },
   DEEP: { symbol: 'DEEP', decimals: 6, icon: 'D' },
   WAL: { symbol: 'WAL', decimals: 9, icon: 'W' },
 };
 
-const TOKEN_KEYS: TokenKey[] = ['SUI', 'USDC', 'DEEP', 'WAL'];
+function getTokenMeta(symbol: string, debugSymbol: string, debugDecimals: number): TokenMeta {
+  const upper = symbol.toUpperCase();
+  if (upper === debugSymbol.toUpperCase()) {
+    return { symbol: upper, decimals: debugDecimals, icon: '◇' };
+  }
+  return TOKENS[upper] ?? { symbol: upper, decimals: 9, icon: '◇' };
+}
 
-function getBalanceHuman(balances: Record<string, number> | undefined, token: TokenKey): string {
+function getBalanceHuman(
+  balances:
+    | {
+        sui_human?: number;
+        usdc_human?: number;
+        deep_human?: number;
+        wal_human?: number;
+        custom?: Record<string, string>;
+      }
+    | undefined,
+  token: string,
+  debugSymbol: string,
+  debugDecimals: number
+): string {
   if (!balances) return '--';
-  const key = `${token.toLowerCase()}_human` as keyof typeof balances;
-  const val = balances[key];
-  if (val == null) return '--';
-  return Number(val).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const upper = token.toUpperCase();
+  if (upper === 'SUI') return Number(balances.sui_human ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (upper === 'USDC') return Number(balances.usdc_human ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (upper === 'DEEP') return Number(balances.deep_human ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (upper === 'WAL') return Number(balances.wal_human ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const raw = balances.custom?.[upper];
+  if (raw == null) return '--';
+  const human = Number(raw) / Math.pow(10, debugSymbol.toUpperCase() === upper ? debugDecimals : 9);
+  return human.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 export function SwapCard({ sessionId }: SwapCardProps) {
-  const [fromToken, setFromToken] = useState<TokenKey>('USDC');
-  const [toToken, setToToken] = useState<TokenKey>('SUI');
+  const { debugPool } = useDebugPoolStatus();
+  const debugSymbol = (debugPool?.token_symbol ?? 'DBG').toUpperCase();
+  const debugDecimals = debugPool?.token_decimals ?? 9;
+  const tokenKeys = useMemo(
+    () => Array.from(new Set(['SUI', 'USDC', 'DEEP', 'WAL', debugSymbol])),
+    [debugSymbol]
+  );
+
+  const [fromToken, setFromToken] = useState<string>('USDC');
+  const [toToken, setToToken] = useState<string>('SUI');
   const [amount, setAmount] = useState('');
   const [showFromSelect, setShowFromSelect] = useState(false);
   const [showToSelect, setShowToSelect] = useState(false);
@@ -40,9 +74,21 @@ export function SwapCard({ sessionId }: SwapCardProps) {
   const addActivity = useActivityStore((s) => s.addActivity);
   const { balances } = useBalances();
 
+  useEffect(() => {
+    if (!tokenKeys.includes(fromToken)) {
+      setFromToken('USDC');
+    }
+    if (!tokenKeys.includes(toToken)) {
+      setToToken(fromToken === 'USDC' ? 'SUI' : 'USDC');
+    }
+  }, [tokenKeys, fromToken, toToken]);
+
+  const fromMeta = getTokenMeta(fromToken, debugSymbol, debugDecimals);
+  const toMeta = getTokenMeta(toToken, debugSymbol, debugDecimals);
+
   // Raw amount in base units for the quote
   const rawAmount = amount && parseFloat(amount) > 0
-    ? (parseFloat(amount) * Math.pow(10, TOKENS[fromToken].decimals)).toFixed(0)
+    ? (parseFloat(amount) * Math.pow(10, fromMeta.decimals)).toFixed(0)
     : '';
 
   const { quote, isLoading: quoteLoading } = useQuote(fromToken, toToken, rawAmount, sessionId);
@@ -105,14 +151,14 @@ export function SwapCard({ sessionId }: SwapCardProps) {
     setAmount('');
   };
 
-  const selectFrom = (t: TokenKey) => {
+  const selectFrom = (t: string) => {
     if (t === toToken) setToToken(fromToken);
     setFromToken(t);
     setShowFromSelect(false);
     setAmount('');
   };
 
-  const selectTo = (t: TokenKey) => {
+  const selectTo = (t: string) => {
     if (t === fromToken) setFromToken(toToken);
     setToToken(t);
     setShowToSelect(false);
@@ -127,8 +173,8 @@ export function SwapCard({ sessionId }: SwapCardProps) {
       <div className="bg-deep-dark rounded-lg p-4 mb-2">
         <div className="flex justify-between mb-2">
           <span className="text-sm text-gray-500">From</span>
-          <span className="text-sm text-gray-500">
-            Balance: {getBalanceHuman(balances as unknown as Record<string, number>, fromToken)}
+              <span className="text-sm text-gray-500">
+            Balance: {getBalanceHuman(balances, fromToken, debugSymbol, debugDecimals)}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -144,7 +190,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
               onClick={() => setShowFromSelect(!showFromSelect)}
               className="flex items-center gap-2 px-3 py-2 bg-deep-card rounded-lg border border-deep-border"
             >
-              <span>{TOKENS[fromToken].icon}</span>
+              <span>{fromMeta.icon}</span>
               <span className="font-medium">{fromToken}</span>
               <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -152,7 +198,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
             </button>
             {showFromSelect && (
               <div className="absolute right-0 mt-1 bg-deep-card border border-deep-border rounded-lg overflow-hidden z-20 min-w-[120px]">
-                {TOKEN_KEYS.map((t) => (
+                {tokenKeys.map((t) => (
                   <button
                     key={t}
                     onClick={() => selectFrom(t)}
@@ -160,7 +206,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
                       t === fromToken ? 'text-deep-blue' : ''
                     }`}
                   >
-                    <span>{TOKENS[t].icon}</span>
+                    <span>{getTokenMeta(t, debugSymbol, debugDecimals).icon}</span>
                     <span>{t}</span>
                   </button>
                 ))}
@@ -186,8 +232,8 @@ export function SwapCard({ sessionId }: SwapCardProps) {
       <div className="bg-deep-dark rounded-lg p-4 mt-2">
         <div className="flex justify-between mb-2">
           <span className="text-sm text-gray-500">To</span>
-          <span className="text-sm text-gray-500">
-            Balance: {getBalanceHuman(balances as unknown as Record<string, number>, toToken)}
+              <span className="text-sm text-gray-500">
+            Balance: {getBalanceHuman(balances, toToken, debugSymbol, debugDecimals)}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -203,7 +249,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
               onClick={() => setShowToSelect(!showToSelect)}
               className="flex items-center gap-2 px-3 py-2 bg-deep-card rounded-lg border border-deep-border"
             >
-              <span>{TOKENS[toToken].icon}</span>
+              <span>{toMeta.icon}</span>
               <span className="font-medium">{toToken}</span>
               <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -211,7 +257,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
             </button>
             {showToSelect && (
               <div className="absolute right-0 mt-1 bg-deep-card border border-deep-border rounded-lg overflow-hidden z-20 min-w-[120px]">
-                {TOKEN_KEYS.map((t) => (
+                {tokenKeys.map((t) => (
                   <button
                     key={t}
                     onClick={() => selectTo(t)}
@@ -219,7 +265,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
                       t === toToken ? 'text-deep-blue' : ''
                     }`}
                   >
-                    <span>{TOKENS[t].icon}</span>
+                    <span>{getTokenMeta(t, debugSymbol, debugDecimals).icon}</span>
                     <span>{t}</span>
                   </button>
                 ))}
@@ -291,7 +337,7 @@ export function SwapCard({ sessionId }: SwapCardProps) {
 
       {/* Sandbox Note */}
       <p className="text-center text-xs text-gray-500 mt-3">
-        Simulated execution • No gas fees
+        VM execution • No gas fees • Fund DEEP via faucet when route requires fee budget
       </p>
     </div>
   );

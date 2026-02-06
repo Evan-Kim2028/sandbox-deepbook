@@ -8,6 +8,10 @@ import type {
   OrderBookResponse,
   QuoteResponse,
   PoolInfo,
+  DebugPoolStatus,
+  DebugPoolListResponse,
+  EnsureDebugPoolRequest,
+  StartupCheckReport,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -77,4 +81,18 @@ export const api = {
     const qs = params.toString();
     return fetchAPI<OrderBookResponse>(`/orderbook${qs ? `?${qs}` : ''}`);
   },
+
+  // Debug pool
+  getDebugPoolStatus: () => fetchAPI<DebugPoolStatus>('/debug/pool'),
+
+  getDebugPools: () => fetchAPI<DebugPoolListResponse>('/debug/pools'),
+
+  ensureDebugPool: (params?: EnsureDebugPoolRequest) =>
+    fetchAPI<DebugPoolStatus>('/debug/pool', {
+      method: 'POST',
+      body: JSON.stringify(params ?? {}),
+    }),
+
+  // Startup diagnostics
+  getStartupCheck: () => fetchAPI<StartupCheckReport>('/startup-check'),
 };

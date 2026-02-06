@@ -3,15 +3,45 @@
 import { useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import type { Balances, OrderBookResponse, QuoteResponse } from '@/types';
+import type { OrderBookResponse, QuoteResponse } from '@/types';
+
+const SESSION_STORAGE_KEY = 'deepbook_sandbox_session_id';
 
 export function useSession() {
+  const resolveSession = async () => {
+    const storedId =
+      typeof window !== 'undefined'
+        ? window.localStorage.getItem(SESSION_STORAGE_KEY)
+        : null;
+
+    if (storedId) {
+      try {
+        return await api.getSession(storedId);
+      } catch {
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem(SESSION_STORAGE_KEY);
+        }
+      }
+    }
+
+    const created = await api.createSession();
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, created.session_id);
+    }
+    return created;
+  };
+
   const { data: session, isLoading } = useQuery({
     queryKey: ['session'],
-    queryFn: api.createSession,
+    queryFn: resolveSession,
     staleTime: Infinity,
     retry: 3,
   });
+
+  useEffect(() => {
+    if (!session?.session_id || typeof window === 'undefined') return;
+    window.localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+  }, [session?.session_id]);
 
   return { session, isLoading };
 }
@@ -85,25 +115,65 @@ export function usePools() {
   return { pools: data?.pools, totalLoaded: data?.total_loaded, isLoading };
 }
 
+export function useDebugPoolStatus() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['debug-pool'],
+    queryFn: api.getDebugPoolStatus,
+    staleTime: 15000,
+    refetchInterval: 30000,
+  });
+
+  return { debugPool: data, isLoading };
+}
+
+export function useDebugPools() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['debug-pools'],
+    queryFn: api.getDebugPools,
+    staleTime: 10000,
+    refetchInterval: 30000,
+  });
+
+  return { pools: data?.pools ?? [], isLoading };
+}
+
+export function useEnsureDebugPool() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.ensureDebugPool,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['debug-pool'] });
+      queryClient.invalidateQueries({ queryKey: ['debug-pools'] });
+      queryClient.invalidateQueries({ queryKey: ['balances'] });
+      queryClient.invalidateQueries({ queryKey: ['quote'] });
+      queryClient.invalidateQueries({ queryKey: ['orderbook'] });
+    },
+  });
+}
+
+export function useStartupCheck() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['startup-check'],
+    queryFn: api.getStartupCheck,
+    staleTime: 15000,
+    refetchInterval: 30000,
+  });
+
+  return { startupCheck: data, isLoading };
+}
+
 export function useFaucet() {
   const queryClient = useQueryClient();
   const { session } = useSession();
 
   return useMutation({
-    mutationFn: async (token: 'sui' | 'usdc' | 'wal' | 'deep') => {
+    mutationFn: async (params: { token: string; amount: string }) => {
       if (!session) throw new Error('No session');
-
-      const amounts: Record<string, string> = {
-        sui: '10000000000',   // 10 SUI
-        usdc: '100000000',    // 100 USDC
-        wal: '50000000000',   // 50 WAL
-        deep: '100000000', // 100 DEEP
-      };
 
       return api.requestTokens({
         session_id: session.session_id,
-        token,
-        amount: amounts[token],
+        token: params.token,
+        amount: params.amount,
       });
     },
     onSuccess: () => {
